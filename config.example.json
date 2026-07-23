@@ -1,0 +1,67 @@
+{
+  "database_path": "data/cerebras_memory.sqlite3",
+  "model_cache_dir": "data/models",
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "embedding_dimensions": 384,
+  "projects_root": "C:\\Users\\matri\\Documents\\myprojects",
+  "transcript_days": 90,
+  "chunk_size": 1800,
+  "chunk_overlap": 200,
+  "candidate_limit": 50,
+  "rrf_k": 60,
+  "max_file_bytes": 1048576,
+  "sources": {
+    "hermes": true,
+    "claude": true,
+    "codex": true,
+    "grok": true,
+    "projects": true
+  },
+  "agent_roots": {
+    "claude": ["%USERPROFILE%\\.claude\\projects"],
+    "codex": [
+      "%USERPROFILE%\\.codex\\sessions",
+      "%USERPROFILE%\\.codex\\archived_sessions"
+    ],
+    "grok": [
+      "%USERPROFILE%\\.grok\\sessions",
+      "%USERPROFILE%\\.grok\\projects"
+    ]
+  },
+  "hermes_command": "hermes",
+  "reranker": {
+    "enabled": true,
+    "model": "ms-marco-MiniLM-L-12-v2",
+    "cache_dir": "data/models/reranker",
+    "candidate_documents": 20,
+    "max_length": 512,
+    "batch_size": 8
+  },
+  "vector_search": {
+    "backend": "auto",
+    "index_dir": "data/vector-index",
+    "ann_min_chunks": 100000,
+    "ann_latency_threshold_ms": 750,
+    "connectivity": 16,
+    "expansion_add": 128,
+    "expansion_search": 64,
+    "dtype": "f16"
+  },
+  "distillation": {
+    "mode": "pilot",
+    "provider": "deepseek",
+    "endpoint": "https://api.deepseek.com/beta",
+    "model": "deepseek-v4-flash",
+    "api_key_env": "DEEPSEEK_API_KEY",
+      "max_output_tokens": 1536,
+      "max_concurrent_requests": 4,
+      "prompt_version": "agent-dialogue-v5-deepseek-isolated-json-fallback",
+    "timeout_seconds": 120,
+    "min_messages": 8,
+    "min_characters": 12000,
+    "max_messages_per_unit": 12,
+    "max_characters_per_unit": 24000,
+    "gap_minutes": 30,
+    "pilot_per_source": 10
+  }
+}

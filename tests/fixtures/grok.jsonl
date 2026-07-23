@@ -1,0 +1,7 @@
+{"timestamp":"2026-07-01T12:00:00Z","method":"session/update","params":{"sessionId":"grok-fixture","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"grok visible user "}}}}
+{"timestamp":"2026-07-01T12:00:00Z","method":"session/update","params":{"sessionId":"grok-fixture","update":{"sessionUpdate":"user_message_chunk","content":"reconstructed"}}}
+{"timestamp":"2026-07-01T12:00:01Z","method":"session/update","params":{"sessionId":"grok-fixture","update":{"sessionUpdate":"agent_thought_chunk","content":"hidden thought"}}}
+{"timestamp":"2026-07-01T12:00:02Z","method":"session/update","params":{"sessionId":"grok-fixture","update":{"sessionUpdate":"tool_call_update","content":"hidden tool output"}}}
+{"timestamp":"2026-07-01T12:00:03Z","method":"session/update","params":{"sessionId":"grok-fixture","update":{"sessionUpdate":"agent_message_chunk","content":"grok visible "}}}
+{"timestamp":"2026-07-01T12:00:04Z","method":"session/update","params":{"sessionId":"grok-fixture","update":{"sessionUpdate":"agent_message_chunk","content":"assistant"}}}
+{"timestamp":"2026-07-01T12:00:05Z","method":"session/update","params":{"sessionId":"grok-fixture","update":{"sessionUpdate":"turn_completed"}}}

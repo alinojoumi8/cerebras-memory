@@ -1,0 +1,192 @@
+{
+  "version": 1,
+  "created_at": "2026-07-21T01:00:00-04:00",
+  "description": "Twenty-four redacted, locally labeled retrieval queries: eight project-document cases and four cases for each agent history source.",
+  "cases": [
+    {
+      "label": "hermes-cerebras-rebuild",
+      "source": "hermes",
+      "query": "Rebuilding Cerebras Knowledge Base System",
+      "expected_document_id": "doc_356c9b3368cf52072cc7f95ece0ac397",
+      "expected_scope": {"project": null, "origin": "global"}
+    },
+    {
+      "label": "hermes-airplane-discovery",
+      "source": "hermes",
+      "query": "Airplane Accident Discovery Prep",
+      "expected_document_id": "doc_bb8a2c1e2a494ae5d4a4e34da1feb860",
+      "expected_scope": {"project": null, "origin": "global"}
+    },
+    {
+      "label": "hermes-economy-simulator",
+      "source": "hermes",
+      "query": "Setting Up AI Economy Simulator",
+      "expected_document_id": "doc_80102f27eec2c8e5e9e39194c65e5e2b",
+      "expected_scope": {"project": null, "origin": "global"}
+    },
+    {
+      "label": "hermes-defence-disclosure",
+      "source": "hermes",
+      "query": "Organizing Defence Disclosure Documents",
+      "expected_document_id": "doc_ffb9484c1188725979dced3175725fbb",
+      "expected_scope": {"project": null, "origin": "global"}
+    },
+    {
+      "label": "claude-cognition-activity",
+      "source": "claude",
+      "query": "CognitionActivity followCognitionActivity",
+      "expected_document_id": "doc_cacc34547624b27f4df74aeb404b9adc",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\worldsim-v1",
+      "expected_scope": {"project": "worldsim-v1", "origin": "client_root"}
+    },
+    {
+      "label": "claude-worldsim-gates",
+      "source": "claude",
+      "query": "Docker SSE PostgreSQL replay scale browser gates",
+      "expected_document_id": "doc_cacc34547624b27f4df74aeb404b9adc",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\worldsim-v1",
+      "expected_scope": {"project": "worldsim-v1", "origin": "client_root"}
+    },
+    {
+      "label": "claude-agent-economy-provider",
+      "source": "claude",
+      "query": "MiniMax M3 live provider observatory",
+      "expected_document_id": "doc_8012edc2bafad7be5f02f9af01e67c3e",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\agent-economy",
+      "expected_scope": {"project": "agent-economy", "origin": "client_root"}
+    },
+    {
+      "label": "claude-terminal-invalidation",
+      "source": "claude",
+      "query": "terminal stream REST invalidation investments",
+      "expected_document_id": "doc_e440b3ecf1effc6233f272704a748747",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\worldsimulator",
+      "expected_scope": {"project": "worldsimulator", "origin": "client_root"}
+    },
+    {
+      "label": "codex-search-quality-upgrade",
+      "source": "codex",
+      "query": "Search Quality Local Distillation Upgrade",
+      "expected_document_id": "doc_efed7b34ed4b8ed28f266d0a33c96e95",
+      "expected_scope": {"project": null, "origin": "global"}
+    },
+    {
+      "label": "codex-cerebras-roots-reranker",
+      "source": "codex",
+      "query": "Cerebras Memory MCP roots reranker",
+      "expected_document_id": "doc_efed7b34ed4b8ed28f266d0a33c96e95",
+      "expected_scope": {"project": null, "origin": "global"}
+    },
+    {
+      "label": "codex-world-os-gateway",
+      "source": "codex",
+      "query": "World OS dashboard external agent gateway",
+      "expected_document_id": "doc_6eb3f69030329dcb72544d5b7b8adc0f",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\agent-economy",
+      "expected_scope": {"project": "agent-economy", "origin": "client_root"}
+    },
+    {
+      "label": "codex-defence-index",
+      "source": "codex",
+      "query": "Ultimate Defense Sortable Index disclosure",
+      "expected_document_id": "doc_b6f79998ecac0b6945a1006206b55df3",
+      "expected_scope": {"project": null, "origin": "global"}
+    },
+    {
+      "label": "grok-hermes-mcp",
+      "source": "grok",
+      "query": "MCP plugin skill agent",
+      "expected_document_id": "doc_33bac95937693e1e76760d41f595de65",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\hermes-agent",
+      "expected_scope": {"project": "hermes-agent", "origin": "client_root"}
+    },
+    {
+      "label": "grok-macro-policy",
+      "source": "grok",
+      "query": "fiscal monetary policy macro economy",
+      "expected_document_id": "doc_3764b9e1de85d716b70bec87d34325f1",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\Kimi_Agent_Macro Economy Simulation PRD",
+      "expected_scope": {"project": "Kimi_Agent_Macro Economy Simulation PRD", "origin": "client_root"}
+    },
+    {
+      "label": "grok-fluidvoice-transcription",
+      "source": "grok",
+      "query": "speech audio transcription",
+      "expected_document_id": "doc_4bec4cbc65e056e2024b9496ffc53c7d",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\FluidVoice",
+      "expected_scope": {"project": "FluidVoice", "origin": "client_root"}
+    },
+    {
+      "label": "grok-fluidvoice-websocket",
+      "source": "grok",
+      "query": "voice websocket streaming",
+      "expected_document_id": "doc_594015c55fc2c1a9605fbaea27b4b1c4",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\FluidVoice",
+      "expected_scope": {"project": "FluidVoice", "origin": "client_root"}
+    },
+    {
+      "label": "projects-replay-executor",
+      "source": "projects",
+      "query": "SimulationKernel deterministic replay",
+      "expected_document_id": "doc_283c3f112fc794dbabdc2ee6151e004a",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\worldsimulator",
+      "expected_scope": {"project": "worldsimulator", "origin": "client_root"}
+    },
+    {
+      "label": "projects-hermes-workflows",
+      "source": "projects",
+      "query": "HermesWorkflowKind runFullAnalysis",
+      "expected_document_id": "doc_01eb45dbdca11e6e1f1fd6a2c2553644",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\CaseForge-Hermes-Bridge",
+      "expected_scope": {"project": "CaseForge-Hermes-Bridge", "origin": "client_root"}
+    },
+    {
+      "label": "projects-northstar",
+      "source": "projects",
+      "query": "Northstar Foods Harbour Republic",
+      "expected_document_id": "doc_3187304ec047e32d0920469ac82a6e50",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\worldsim-v2",
+      "expected_scope": {"project": "worldsim-v2", "origin": "client_root"}
+    },
+    {
+      "label": "projects-external-agent-gateway",
+      "source": "projects",
+      "query": "external-agent-gateway Agent Commons",
+      "expected_document_id": "doc_9d35efe3acb9640e7bfe334c7654e846",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\agent-economy",
+      "expected_scope": {"project": "agent-economy", "origin": "client_root"}
+    },
+    {
+      "label": "projects-native-sqlcipher",
+      "source": "projects",
+      "query": "SQLCipher Tauri native backend",
+      "expected_document_id": "doc_b244f1232f2187ea635658989a0825d4",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\Kimi_Agent_AI Legal Case Companion",
+      "expected_scope": {"project": "Kimi_Agent_AI Legal Case Companion", "origin": "client_root"}
+    },
+    {
+      "label": "projects-god-map-activity",
+      "source": "projects",
+      "query": "God Map cognition activity pulses",
+      "expected_document_id": "doc_f68577c4d3c4cddd055f3d704ff7b10c",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\worldsim-v1",
+      "expected_scope": {"project": "worldsim-v1", "origin": "client_root"}
+    },
+    {
+      "label": "projects-investment-stream",
+      "source": "projects",
+      "query": "terminal stream investment read store",
+      "expected_document_id": "doc_6cd489e160bf69e485890ffa4f1ba09a",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\worldsimulator",
+      "expected_scope": {"project": "worldsimulator", "origin": "client_root"}
+    },
+    {
+      "label": "projects-world-os-semantics",
+      "source": "projects",
+      "query": "World OS semantics dashboard",
+      "expected_document_id": "doc_bef6fca0ae5ee3b1f79c86fe6b4fe1f0",
+      "scope_path": "C:\\Users\\matri\\Documents\\myprojects\\agent-economy",
+      "expected_scope": {"project": "agent-economy", "origin": "client_root"}
+    }
+  ]
+}

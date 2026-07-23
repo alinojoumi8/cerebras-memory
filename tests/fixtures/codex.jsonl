@@ -1,0 +1,8 @@
+{"type":"session_meta","timestamp":"2026-07-01T12:00:00Z","payload":{"id":"codex-fixture","cwd":"C:\\work\\beta"}}
+{"type":"response_item","timestamp":"2026-07-01T12:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex visible user"}]}}
+{"type":"event_msg","timestamp":"2026-07-01T12:00:01Z","payload":{"type":"user_message","message":"duplicate event user"}}
+{"type":"response_item","timestamp":"2026-07-01T12:00:02Z","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"hidden reasoning"}]}}
+{"type":"response_item","timestamp":"2026-07-01T12:00:03Z","payload":{"type":"function_call","name":"shell","arguments":"hidden tool call"}}
+{"type":"response_item","timestamp":"2026-07-01T12:00:04Z","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"hidden developer"}]}}
+{"type":"response_item","timestamp":"2026-07-01T12:00:05Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"codex visible assistant"}]}}
+{"type":"response_item","timestamp":"2025-01-01T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"old codex prompt"}]}}

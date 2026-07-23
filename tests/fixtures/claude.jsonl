@@ -1,0 +1,6 @@
+{"type":"user","sessionId":"claude-fixture","timestamp":"2026-07-01T12:00:00Z","cwd":"C:\\work\\alpha","message":{"role":"user","content":"visible user prompt sk-proj-ABCDEFGHIJKLMNOPQRSTUV123456"}}
+{"type":"assistant","sessionId":"claude-fixture","timestamp":"2026-07-01T12:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hidden reasoning"},{"type":"text","text":"visible assistant reply"},{"type":"tool_use","name":"shell","input":{"command":"hidden tool call"}}]}}
+{"type":"assistant","sessionId":"claude-fixture","timestamp":"2026-07-01T12:00:02Z","isSidechain":true,"message":{"role":"assistant","content":"hidden sidechain"}}
+{"type":"system","sessionId":"claude-fixture","timestamp":"2026-07-01T12:00:03Z","message":{"role":"system","content":"hidden system message"}}
+{"type":"user","sessionId":"claude-fixture","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"outside rolling window"}}
+{malformed-json

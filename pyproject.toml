@@ -1,0 +1,25 @@
+[project]
+name = "cerebras-memory"
+version = "0.1.0"
+description = "Private local MCP knowledge base shared by desktop coding agents"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "fastembed==0.8.0",
+    "flashrank==0.2.10",
+    "mcp[cli]==1.28.1",
+    "numpy==1.26.4",
+    "usearch==2.26.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==8.4.2",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.uv]
+package = false
