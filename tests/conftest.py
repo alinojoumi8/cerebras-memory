@@ -38,6 +38,7 @@ def settings_factory(tmp_path: Path):
                 candidate_documents=20,
                 max_length=128,
                 batch_size=8,
+                intra_op_threads=2,
             ),
             "vector_search": VectorSearchSettings(
                 backend="exact",
@@ -65,7 +66,27 @@ def settings_factory(tmp_path: Path):
                 max_characters_per_unit=24_000,
                 gap_minutes=30,
                 pilot_per_source=10,
+                remote_policy_enabled=True,
+                remote_allow_sources=("hermes", "claude", "codex", "grok"),
+                remote_allow_projects=(),
+                remote_deny_projects=(),
+                sensitive_project_terms=(
+                    "legal",
+                    "case",
+                    "defence",
+                    "defense",
+                    "court",
+                    "osc",
+                    "disclosure",
+                    "privileged",
+                    "counsel",
+                ),
+                block_unscoped_remote=False,
+                audit_remote_requests=True,
             ),
+            "canary_suite_path": tmp_path / "evaluation" / "canary-suite.json",
+            "canary_run_after_refresh": False,
+            "canary_latency_threshold_ms": 1_500.0,
         }
         values.update(overrides)
         return Settings(**values)

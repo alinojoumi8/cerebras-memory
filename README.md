@@ -23,7 +23,8 @@ not replace or modify the existing Codex AgentMemory server.
 - `usearch==2.26.0`
 - `BAAI/bge-small-en-v1.5`, 384 dimensions, CPU/ONNX
 - `ms-marco-MiniLM-L-12-v2`, local CPU/ONNX reranker
-- DeepSeek V4 Flash structured distillation with an Ollama loopback fallback
+- DeepSeek V4 Flash structured distillation, with Ollama available as a
+  separately configured loopback alternative
 - SQLite with WAL, FTS5, foreign keys, and a 30-second busy timeout
 
 `pyproject.toml` and `uv.lock` are authoritative. Create or refresh the exact
@@ -47,6 +48,10 @@ DEEPSEEK_API_KEY=your-key-here
 
 The loader allowlists only `DEEPSEEK_API_KEY` and the reserved
 `NVIDIA_API_KEY`, and never overwrites an already-set process environment value.
+For a remote provider, the local policy gate runs before the request is built:
+only allowlisted conversation sources qualify, and sensitive project/title/URI
+labels are blocked. The outbound audit is content-free and records only IDs,
+hashes, counts, policy decisions, status, and endpoint metadata.
 
 ## Ingestion
 
@@ -117,6 +122,9 @@ found inside it.
 .\.venv\Scripts\python.exe kb.py distill pilot
 .\.venv\Scripts\python.exe kb.py distill evaluate
 .\.venv\Scripts\python.exe kb.py distill backfill
+.\.venv\Scripts\python.exe kb.py distill status
+.\.venv\Scripts\python.exe kb.py canary status
+.\.venv\Scripts\python.exe kb.py canary run
 .\.venv\Scripts\python.exe scripts\audit_distillation.py
 ```
 
@@ -138,9 +146,13 @@ scope. Every unrelated MCP entry remains untouched. Backups are written beneath
 `backups\registration-*`.
 
 `CerebrasMemoryRefresh` runs at 03:00 local time as the current non-elevated
-user, uses `StartWhenAvailable`, and ignores overlapping starts. The refresh
-script also holds a cross-process ingestion lock. Aggregate, redacted logs are
-written to `logs\refresh.log` and rotate at 5 MiB.
+user, uses `StartWhenAvailable`, ignores overlapping starts, may start and
+continue on battery, does not stop at the end of an idle period, and has a
+six-hour execution limit. A SQLite-backed lease with heartbeats records the
+active owner and recovers interrupted or orphaned refreshes. The refresh script
+streams redacted start/output/end records to `logs\refresh.log` while it runs;
+the log rotates at 5 MiB. A successful refresh also executes the local,
+content-free quality canary suite.
 
 Codex and ChatGPT desktop share the same MCP configuration, so there is no
 separate ChatGPT adapter. The installer restarts or launches only the distinct
@@ -200,16 +212,28 @@ checked before use; any mismatch falls back to exact search.
 Conversation distillation is staged: retrieval is disabled while
 `distillation.mode` is `pilot` and enabled after audited promotion with mode
 `on`. Qualifying Hermes, Claude, Codex, and Grok dialogue is segmented locally.
-The deployed DeepSeek provider sends only the redacted segment to
-`https://api.deepseek.com/beta`, disables thinking, forces the one allowed
-function, retries bounded invalid responses, and uses an exact-schema JSON
-fallback. Up to four cloud requests may run concurrently; embeddings and
-SQLite checkpoints remain serialized. Ollama remains available as a loopback
-provider. Summaries are redacted again, indexed as a third retrieval channel,
-and always mapped back to raw chunks—generated text is never returned as
-evidence or cited. Saved memories and project files are never distilled.
-Provider failures remain pending/failed derived work and never block raw
-ingestion.
+For DeepSeek, a local source/project sensitivity policy runs before any request.
+Allowed requests send only the redacted segment to
+`https://api.deepseek.com/beta`, disable thinking, force the one allowed
+function, retry bounded invalid responses, and use an exact-schema JSON
+fallback. Blocked segments never reach the provider, are not retryable failures,
+and are excluded from summary retrieval. A content-free outbound audit records
+the policy decision and terminal request state without storing prompts or
+responses. Up to four cloud requests may run concurrently; embeddings and
+SQLite checkpoints remain serialized. Ollama remains available as an explicitly
+selected loopback provider. Summaries are redacted again, indexed as a third
+retrieval channel, and always mapped back to raw chunks—generated text is never
+returned as evidence or cited. Saved memories and project files are never
+distilled. Provider failures remain pending/failed derived work and never block
+raw ingestion.
+
+Every live document, raw chunk, and distillation has a stable provenance
+receipt. `derived_from` edges connect derived records to their inputs. Taints
+distinguish untrusted evidence, executable-looking instructions,
+externally-processed summaries, and generated summaries. Search/get responses
+surface the relevant receipts and taints while preserving the existing raw
+document/chunk IDs and citations. Automatic reconciliation and explicit memory
+forgetting write content-free deletion manifests before cascade removal.
 
 Changing the embedding model or dimensions causes unchanged documents to be
 re-embedded during the next refresh. A full model change should be followed by
@@ -222,11 +246,13 @@ re-embedded during the next refresh. A full model change should be followed by
 ```
 
 The suite covers all four transcript formats, redaction and exclusions, rolling
-retention, updates/deletions/idempotency, transactional v1-to-v2 migration,
+retention, updates/deletions/idempotency, transactional v1-to-v2-to-v3 migration,
 document deduplication/context selection, reranker ordering/fallback, roots/CWD
 scope inference, RRF/recency, USearch recall and generation safety, distillation
-segmentation/cache/retry/cascades, WAL writers, reconciliation safety, and real
-spawned MCP STDIO exchanges with and without roots support.
+segmentation/cache/retry/cascades, remote policy transitions and content-free
+auditing, provenance/deletion accounting, refresh lease recovery, bounded
+embedding execution, recorded canaries, WAL writers, reconciliation safety, and
+real spawned MCP STDIO exchanges with and without roots support.
 
 The fixed 24-query local gate can be run after the label set is populated:
 

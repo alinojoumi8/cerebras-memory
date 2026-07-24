@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     backfill.add_argument("--force", action="store_true")
     evaluate = distill_commands.add_parser("evaluate")
     evaluate.add_argument("--limit", type=int, default=24)
+
+    canary = commands.add_parser("canary", help="run or inspect versioned retrieval canaries")
+    canary_commands = canary.add_subparsers(dest="canary_command", required=True)
+    canary_commands.add_parser("status")
+    canary_run = canary_commands.add_parser("run")
+    canary_run.add_argument("--suite", type=Path)
     return parser
 
 
@@ -137,6 +143,19 @@ def main(argv: list[str] | None = None) -> int:
                 )
             elif args.distill_command == "evaluate":
                 _print(store.evaluate_distillations(limit=args.limit))
+        elif args.command == "canary":
+            if args.canary_command == "status":
+                _print(store.canary_status())
+            elif args.canary_command == "run":
+                from quality import evaluate_canary_suite
+
+                _print(
+                    evaluate_canary_suite(
+                        store,
+                        args.suite or store.settings.canary_suite_path,
+                        record=True,
+                    )
+                )
         return 0
     except (ValueError, PermissionError, RuntimeError) as exc:
         _print({"error": str(exc)})

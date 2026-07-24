@@ -2,10 +2,11 @@
   "all_expected_scopes_correct": true,
   "all_top_8_document_ids_distinct": true,
   "baseline": {
-    "mrr_at_8": 0.493056,
+    "mrr_at_8": 0.425347,
     "recall_at_8": 0.625
   },
   "cases": 24,
+  "distillation_channel": "enabled",
   "gate_passed": true,
   "label_set": "C:\\Users\\matri\\Downloads\\cerebras memory\\ceribras-memory\\evaluation\\search-quality-baseline.json",
   "no_retrieval_quality_regression": true,
@@ -15,7 +16,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_356c9b3368cf52072cc7f95ece0ac397",
       "label": "hermes-cerebras-rebuild",
-      "latency_ms": 1094.947,
+      "latency_ms": 2448.397,
       "scope": {
         "origin": "global",
         "project": null
@@ -28,7 +29,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_bb8a2c1e2a494ae5d4a4e34da1feb860",
       "label": "hermes-airplane-discovery",
-      "latency_ms": 1226.727,
+      "latency_ms": 1491.87,
       "scope": {
         "origin": "global",
         "project": null
@@ -41,20 +42,20 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_80102f27eec2c8e5e9e39194c65e5e2b",
       "label": "hermes-economy-simulator",
-      "latency_ms": 1180.927,
+      "latency_ms": 1103.816,
       "scope": {
         "origin": "global",
         "project": null
       },
       "source": "hermes",
-      "upgraded_rank": 1
+      "upgraded_rank": 2
     },
     {
       "baseline_rank": 1,
       "distinct_top_8": true,
       "expected_document_id": "doc_ffb9484c1188725979dced3175725fbb",
       "label": "hermes-defence-disclosure",
-      "latency_ms": 2102.06,
+      "latency_ms": 1477.113,
       "scope": {
         "origin": "global",
         "project": null
@@ -67,7 +68,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_cacc34547624b27f4df74aeb404b9adc",
       "label": "claude-cognition-activity",
-      "latency_ms": 82.188,
+      "latency_ms": 189.036,
       "scope": {
         "origin": "client_root",
         "project": "worldsim-v1"
@@ -80,20 +81,20 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_cacc34547624b27f4df74aeb404b9adc",
       "label": "claude-worldsim-gates",
-      "latency_ms": 151.636,
+      "latency_ms": 260.828,
       "scope": {
         "origin": "client_root",
         "project": "worldsim-v1"
       },
       "source": "claude",
-      "upgraded_rank": 1
+      "upgraded_rank": 2
     },
     {
       "baseline_rank": null,
       "distinct_top_8": true,
       "expected_document_id": "doc_8012edc2bafad7be5f02f9af01e67c3e",
       "label": "claude-agent-economy-provider",
-      "latency_ms": 154.172,
+      "latency_ms": 293.184,
       "scope": {
         "origin": "client_root",
         "project": "agent-economy"
@@ -106,20 +107,20 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_e440b3ecf1effc6233f272704a748747",
       "label": "claude-terminal-invalidation",
-      "latency_ms": 91.619,
+      "latency_ms": 161.734,
       "scope": {
         "origin": "client_root",
         "project": "worldsimulator"
       },
       "source": "claude",
-      "upgraded_rank": 1
+      "upgraded_rank": 2
     },
     {
       "baseline_rank": 1,
       "distinct_top_8": true,
       "expected_document_id": "doc_efed7b34ed4b8ed28f266d0a33c96e95",
       "label": "codex-search-quality-upgrade",
-      "latency_ms": 1181.922,
+      "latency_ms": 1404.316,
       "scope": {
         "origin": "global",
         "project": null
@@ -132,7 +133,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_efed7b34ed4b8ed28f266d0a33c96e95",
       "label": "codex-cerebras-roots-reranker",
-      "latency_ms": 842.441,
+      "latency_ms": 1175.049,
       "scope": {
         "origin": "global",
         "project": null
@@ -145,7 +146,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_6eb3f69030329dcb72544d5b7b8adc0f",
       "label": "codex-world-os-gateway",
-      "latency_ms": 1340.786,
+      "latency_ms": 1047.088,
       "scope": {
         "origin": "client_root",
         "project": "agent-economy"
@@ -154,11 +155,11 @@
       "upgraded_rank": 7
     },
     {
-      "baseline_rank": 1,
+      "baseline_rank": 2,
       "distinct_top_8": true,
       "expected_document_id": "doc_b6f79998ecac0b6945a1006206b55df3",
       "label": "codex-defence-index",
-      "latency_ms": 1050.741,
+      "latency_ms": 1244.378,
       "scope": {
         "origin": "global",
         "project": null
@@ -171,7 +172,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_33bac95937693e1e76760d41f595de65",
       "label": "grok-hermes-mcp",
-      "latency_ms": 165.396,
+      "latency_ms": 283.166,
       "scope": {
         "origin": "client_root",
         "project": "hermes-agent"
@@ -184,7 +185,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_3764b9e1de85d716b70bec87d34325f1",
       "label": "grok-macro-policy",
-      "latency_ms": 404.642,
+      "latency_ms": 625.236,
       "scope": {
         "origin": "client_root",
         "project": "Kimi_Agent_Macro Economy Simulation PRD"
@@ -197,33 +198,33 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_4bec4cbc65e056e2024b9496ffc53c7d",
       "label": "grok-fluidvoice-transcription",
-      "latency_ms": 707.981,
+      "latency_ms": 1258.877,
       "scope": {
         "origin": "client_root",
         "project": "FluidVoice"
       },
       "source": "grok",
-      "upgraded_rank": 2
+      "upgraded_rank": 3
     },
     {
       "baseline_rank": null,
       "distinct_top_8": true,
       "expected_document_id": "doc_594015c55fc2c1a9605fbaea27b4b1c4",
       "label": "grok-fluidvoice-websocket",
-      "latency_ms": 802.611,
+      "latency_ms": 1223.15,
       "scope": {
         "origin": "client_root",
         "project": "FluidVoice"
       },
       "source": "grok",
-      "upgraded_rank": null
+      "upgraded_rank": 8
     },
     {
-      "baseline_rank": 1,
+      "baseline_rank": 2,
       "distinct_top_8": true,
       "expected_document_id": "doc_283c3f112fc794dbabdc2ee6151e004a",
       "label": "projects-replay-executor",
-      "latency_ms": 916.595,
+      "latency_ms": 836.496,
       "scope": {
         "origin": "client_root",
         "project": "worldsimulator"
@@ -236,7 +237,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_01eb45dbdca11e6e1f1fd6a2c2553644",
       "label": "projects-hermes-workflows",
-      "latency_ms": 546.189,
+      "latency_ms": 495.334,
       "scope": {
         "origin": "client_root",
         "project": "CaseForge-Hermes-Bridge"
@@ -249,7 +250,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_3187304ec047e32d0920469ac82a6e50",
       "label": "projects-northstar",
-      "latency_ms": 685.204,
+      "latency_ms": 521.292,
       "scope": {
         "origin": "client_root",
         "project": "worldsim-v2"
@@ -258,11 +259,11 @@
       "upgraded_rank": 1
     },
     {
-      "baseline_rank": 4,
+      "baseline_rank": 8,
       "distinct_top_8": true,
       "expected_document_id": "doc_9d35efe3acb9640e7bfe334c7654e846",
       "label": "projects-external-agent-gateway",
-      "latency_ms": 906.32,
+      "latency_ms": 1040.499,
       "scope": {
         "origin": "client_root",
         "project": "agent-economy"
@@ -275,7 +276,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_b244f1232f2187ea635658989a0825d4",
       "label": "projects-native-sqlcipher",
-      "latency_ms": 919.736,
+      "latency_ms": 1144.211,
       "scope": {
         "origin": "client_root",
         "project": "Kimi_Agent_AI Legal Case Companion"
@@ -288,7 +289,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_f68577c4d3c4cddd055f3d704ff7b10c",
       "label": "projects-god-map-activity",
-      "latency_ms": 306.91,
+      "latency_ms": 466.622,
       "scope": {
         "origin": "client_root",
         "project": "worldsim-v1"
@@ -301,7 +302,7 @@
       "distinct_top_8": true,
       "expected_document_id": "doc_6cd489e160bf69e485890ffa4f1ba09a",
       "label": "projects-investment-stream",
-      "latency_ms": 1075.589,
+      "latency_ms": 1275.781,
       "scope": {
         "origin": "client_root",
         "project": "worldsimulator"
@@ -310,11 +311,11 @@
       "upgraded_rank": 1
     },
     {
-      "baseline_rank": 1,
+      "baseline_rank": 2,
       "distinct_top_8": true,
       "expected_document_id": "doc_bef6fca0ae5ee3b1f79c86fe6b4fe1f0",
       "label": "projects-world-os-semantics",
-      "latency_ms": 830.996,
+      "latency_ms": 722.369,
       "scope": {
         "origin": "client_root",
         "project": "agent-economy"
@@ -331,9 +332,9 @@
     "projects"
   ],
   "upgraded": {
-    "mrr_at_8": 0.880952,
-    "recall_at_8": 0.958333
+    "mrr_at_8": 0.816716,
+    "recall_at_8": 1.0
   },
   "warm_p95_below_1500_ms": true,
-  "warm_p95_latency_ms": 1340.786
+  "warm_p95_latency_ms": 1491.87
 }

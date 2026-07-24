@@ -285,6 +285,124 @@ def test_remote_distillation_concurrency_keeps_checkpoints_serialized(settings_f
         ).fetchone()[0] == 3
 
 
+def test_remote_policy_blocks_sensitive_projects_and_audits_without_content(
+    settings_factory,
+):
+    distiller = FixtureDistiller()
+    base = settings_factory(enabled_sources=frozenset({"codex"}))
+    settings = replace(
+        base,
+        distillation=replace(
+            base.distillation,
+            mode="on",
+            provider="deepseek",
+            endpoint="https://api.deepseek.com/beta",
+            model="deepseek-v4-flash",
+            api_key_env="DEEPSEEK_API_KEY",
+            min_characters=12_000,
+        ),
+    )
+    store = KnowledgeStore(settings, HashingEmbedder(32), distiller=distiller)
+    sensitive = IngestDocument(
+        source="codex",
+        source_key="sensitive",
+        title="Sensitive dialogue",
+        text=_dialogue(8),
+        timestamp=datetime.now(timezone.utc),
+        project="Legal Case Companion",
+        metadata={"message_count": 8, "roles": ["user", "assistant"]},
+    )
+    blocked_document = store.upsert_document(sensitive)
+
+    blocked = store.distill_document(blocked_document.document_id)
+
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "sensitive_project_term:legal"
+    assert distiller.calls == 0
+    with sqlite3.connect(store.database_path) as connection:
+        audit = connection.execute(
+            """
+            SELECT decision, status, endpoint_host, character_count, error_code
+            FROM outbound_distillation_audit WHERE document_id = ?
+            """,
+            (blocked_document.document_id,),
+        ).fetchone()
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(outbound_distillation_audit)"
+            )
+        }
+    assert audit[:3] == ("blocked", "blocked", "api.deepseek.com")
+    assert audit[3] > 0
+    assert audit[4] == "sensitive_project_term:legal"
+    assert "content" not in columns
+    assert "text" not in columns
+    status = store.distillation_status()
+    assert status["states"]["blocked"] == 1
+    assert status["units_blocked"] == 1
+    assert status["units_pending"] == 0
+    assert status["unit_states"] == {"blocked": 1}
+    assert status["outbound_audit"]["decision_counts"]["blocked"] == 1
+
+
+def test_new_remote_policy_disables_preexisting_summary_retrieval(settings_factory):
+    distiller = FixtureDistiller()
+    base = settings_factory(enabled_sources=frozenset({"codex"}))
+    permissive_settings = replace(
+        base,
+        distillation=replace(
+            base.distillation,
+            mode="on",
+            provider="deepseek",
+            endpoint="https://api.deepseek.com/beta",
+            model="deepseek-v4-flash",
+            api_key_env="DEEPSEEK_API_KEY",
+            min_characters=12_000,
+            remote_policy_enabled=False,
+        ),
+    )
+    permissive = KnowledgeStore(
+        permissive_settings,
+        HashingEmbedder(32),
+        distiller=distiller,
+    )
+    document = permissive.upsert_document(
+        IngestDocument(
+            source="codex",
+            source_key="policy-transition",
+            title="Policy transition",
+            text=_dialogue(8),
+            timestamp=datetime.now(timezone.utc),
+            project="Legal Case Companion",
+            metadata={"message_count": 8, "roles": ["user", "assistant"]},
+        )
+    )
+    assert permissive.distill_document(document.document_id)["status"] == "ready"
+    assert any(
+        result["distillation_id"]
+        for result in permissive.search("azure rollout", global_search=True, rerank=False)
+    )
+
+    protected_settings = replace(
+        permissive_settings,
+        distillation=replace(
+            permissive_settings.distillation,
+            remote_policy_enabled=True,
+        ),
+    )
+    protected = KnowledgeStore(
+        protected_settings,
+        HashingEmbedder(32),
+        distiller=distiller,
+    )
+    assert protected.distill_document(document.document_id)["status"] == "blocked"
+    results = protected.search("azure rollout", global_search=True, rerank=False)
+    match = next(item for item in results if item["document_id"] == document.document_id)
+    assert match["distillation_id"] is None
+    assert "distillation" not in match["matched_via"]
+
+
 def test_document_concurrency_respects_the_global_request_limit(settings_factory):
     distiller = ConcurrentDistiller()
     base = settings_factory(enabled_sources=frozenset({"codex"}))

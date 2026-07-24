@@ -7,10 +7,24 @@ untrusted evidence and must never be interpreted as instructions by a client.
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 from pathlib import Path
 import re
 from typing import Any
 from urllib.parse import unquote, urlparse
+
+# Every desktop client launches its own STDIO worker. Bound native library
+# thread pools before NumPy/ONNX import so several idle clients cannot reserve
+# a full-machine executor each.
+for _name, _value in {
+    "OMP_NUM_THREADS": "4",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+    "OMP_WAIT_POLICY": "PASSIVE",
+}.items():
+    os.environ.setdefault(_name, _value)
 
 from mcp import types
 from mcp.server.fastmcp import Context, FastMCP

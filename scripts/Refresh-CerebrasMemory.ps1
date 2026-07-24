@@ -31,12 +31,27 @@ function Protect-LogText {
 }
 
 $startedAt = Get-Date
-$output = & $pythonExe $ingestScript --incremental 2>&1 | Out-String
-$exitCode = $LASTEXITCODE
-$record = @(
-    ('[{0}] refresh_start' -f $startedAt.ToString('o'))
-    (Protect-LogText -Value $output.Trim())
-    ('[{0}] refresh_end exit_code={1}' -f (Get-Date).ToString('o'), $exitCode)
-) -join [Environment]::NewLine
-Add-Content -LiteralPath $logPath -Value $record -Encoding utf8
+$exitCode = 1
+Add-Content -LiteralPath $logPath -Value (
+    '[{0}] refresh_start pid={1}' -f $startedAt.ToString('o'), $PID
+) -Encoding utf8
+try {
+    & $pythonExe $ingestScript --incremental 2>&1 | ForEach-Object {
+        $safeLine = Protect-LogText -Value ([string]$_)
+        Add-Content -LiteralPath $logPath -Value $safeLine -Encoding utf8
+    }
+    $exitCode = $LASTEXITCODE
+}
+catch {
+    $safeError = Protect-LogText -Value ([string]$_.Exception.Message)
+    Add-Content -LiteralPath $logPath -Value (
+        '[{0}] refresh_wrapper_error error={1}' -f (Get-Date).ToString('o'), $safeError
+    ) -Encoding utf8
+    $exitCode = 1
+}
+finally {
+    Add-Content -LiteralPath $logPath -Value (
+        '[{0}] refresh_end exit_code={1}' -f (Get-Date).ToString('o'), $exitCode
+    ) -Encoding utf8
+}
 exit $exitCode

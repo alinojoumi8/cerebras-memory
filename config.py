@@ -28,6 +28,7 @@ class RerankerSettings:
     candidate_documents: int
     max_length: int
     batch_size: int
+    intra_op_threads: int
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,13 @@ class DistillationSettings:
     max_characters_per_unit: int
     gap_minutes: int
     pilot_per_source: int
+    remote_policy_enabled: bool
+    remote_allow_sources: tuple[str, ...]
+    remote_allow_projects: tuple[str, ...]
+    remote_deny_projects: tuple[str, ...]
+    sensitive_project_terms: tuple[str, ...]
+    block_unscoped_remote: bool
+    audit_remote_requests: bool
 
 
 @dataclass(frozen=True)
@@ -84,6 +92,9 @@ class Settings:
     reranker: RerankerSettings
     vector_search: VectorSearchSettings
     distillation: DistillationSettings
+    canary_suite_path: Path
+    canary_run_after_refresh: bool
+    canary_latency_threshold_ms: float
 
     def ensure_runtime_directories(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +181,7 @@ def _defaults() -> dict[str, Any]:
             "candidate_documents": 20,
             "max_length": 512,
             "batch_size": 8,
+            "intra_op_threads": 24,
         },
         "vector_search": {
             "backend": "auto",
@@ -197,6 +209,30 @@ def _defaults() -> dict[str, Any]:
             "max_characters_per_unit": 24_000,
             "gap_minutes": 30,
             "pilot_per_source": 10,
+            "remote_policy": {
+                "enabled": True,
+                "allow_sources": ["hermes", "claude", "codex", "grok"],
+                "allow_projects": [],
+                "deny_projects": [],
+                "sensitive_project_terms": [
+                    "legal",
+                    "case",
+                    "defence",
+                    "defense",
+                    "court",
+                    "osc",
+                    "disclosure",
+                    "privileged",
+                    "counsel",
+                ],
+                "block_unscoped": False,
+                "audit_requests": True,
+            },
+        },
+        "quality": {
+            "canary_suite": "evaluation/canary-suite.json",
+            "run_after_refresh": True,
+            "latency_threshold_ms": 1_500.0,
         },
     }
 
@@ -228,6 +264,12 @@ def load_settings(path: str | Path | None = None) -> Settings:
     reranker = raw.get("reranker", {})
     vector_search = raw.get("vector_search", {})
     distillation = raw.get("distillation", {})
+    quality = raw.get("quality", {})
+    if not isinstance(quality, dict):
+        raise ValueError("quality must be an object")
+    remote_policy = distillation.get("remote_policy", {})
+    if not isinstance(remote_policy, dict):
+        raise ValueError("distillation.remote_policy must be an object")
     vector_backend = str(vector_search.get("backend", "auto")).casefold()
     if vector_backend not in {"auto", "exact", "hnsw"}:
         raise ValueError("vector_search.backend must be auto, exact, or hnsw")
@@ -273,6 +315,10 @@ def load_settings(path: str | Path | None = None) -> Settings:
             candidate_documents=max(1, min(20, int(reranker.get("candidate_documents", 20)))),
             max_length=max(64, min(512, int(reranker.get("max_length", 512)))),
             batch_size=max(1, min(64, int(reranker.get("batch_size", 8)))),
+            intra_op_threads=max(
+                1,
+                min(24, int(reranker.get("intra_op_threads", 24))),
+            ),
         ),
         vector_search=VectorSearchSettings(
             backend=vector_backend,
@@ -308,6 +354,54 @@ def load_settings(path: str | Path | None = None) -> Settings:
             ),
             gap_minutes=max(1, int(distillation.get("gap_minutes", 30))),
             pilot_per_source=max(1, int(distillation.get("pilot_per_source", 10))),
+            remote_policy_enabled=bool(remote_policy.get("enabled", True)),
+            remote_allow_sources=tuple(
+                str(value).strip().casefold()
+                for value in remote_policy.get(
+                    "allow_sources",
+                    ["hermes", "claude", "codex", "grok"],
+                )
+                if str(value).strip()
+            ),
+            remote_allow_projects=tuple(
+                str(value).strip()
+                for value in remote_policy.get("allow_projects", [])
+                if str(value).strip()
+            ),
+            remote_deny_projects=tuple(
+                str(value).strip()
+                for value in remote_policy.get("deny_projects", [])
+                if str(value).strip()
+            ),
+            sensitive_project_terms=tuple(
+                str(value).strip().casefold()
+                for value in remote_policy.get(
+                    "sensitive_project_terms",
+                    [
+                        "legal",
+                        "case",
+                        "defence",
+                        "defense",
+                        "court",
+                        "osc",
+                        "disclosure",
+                        "privileged",
+                        "counsel",
+                    ],
+                )
+                if str(value).strip()
+            ),
+            block_unscoped_remote=bool(remote_policy.get("block_unscoped", False)),
+            audit_remote_requests=bool(remote_policy.get("audit_requests", True)),
+        ),
+        canary_suite_path=_expand_path(
+            quality.get("canary_suite", "evaluation/canary-suite.json"),
+            base=PROJECT_ROOT,
+        ),
+        canary_run_after_refresh=bool(quality.get("run_after_refresh", True)),
+        canary_latency_threshold_ms=max(
+            1.0,
+            float(quality.get("latency_threshold_ms", 1_500.0)),
         ),
     )
 

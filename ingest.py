@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import sys
+import threading
 from typing import Callable
 
 from chunking import chunk_text
@@ -16,10 +17,61 @@ from models import ScanResult
 from redaction import redact_text
 from runlock import IngestionAlreadyRunning, ingestion_lock
 from stdio import configure_utf8_stdio
-from store import KnowledgeStore
+from store import KnowledgeStore, RefreshLease
 
 
 Scanner = Callable[[Settings, datetime], ScanResult]
+_REFRESH_HEARTBEAT_SECONDS = 60
+_REFRESH_LEASE_SECONDS = 30 * 60
+
+
+class _RefreshHeartbeat:
+    def __init__(self, store: KnowledgeStore, lease: RefreshLease):
+        self.store = store
+        self.lease = lease
+        self._source: str | None = None
+        self._source_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="cerebras-memory-refresh-heartbeat",
+            daemon=True,
+        )
+        self.last_error: str | None = None
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def set_source(self, source: str | None) -> None:
+        with self._source_lock:
+            self._source = source
+        try:
+            self.store.heartbeat_refresh_run(
+                self.lease,
+                current_source=source,
+                lease_seconds=_REFRESH_LEASE_SECONDS,
+            )
+            self.last_error = None
+        except Exception as exc:
+            self.last_error = _safe_error(f"Refresh heartbeat failed: {exc}")
+
+    def _run(self) -> None:
+        while not self._stop.wait(_REFRESH_HEARTBEAT_SECONDS):
+            with self._source_lock:
+                source = self._source
+            try:
+                self.store.heartbeat_refresh_run(
+                    self.lease,
+                    current_source=source,
+                    lease_seconds=_REFRESH_LEASE_SECONDS,
+                )
+                self.last_error = None
+            except Exception as exc:
+                self.last_error = _safe_error(f"Refresh heartbeat failed: {exc}")
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
 
 
 def _scanners(settings: Settings) -> list[tuple[str, Scanner]]:
@@ -37,14 +89,19 @@ def _safe_error(value: str) -> str:
     return redact_text(value).replace("\r", " ").replace("\n", " ")[:1000]
 
 
-def run_ingestion(
+def _run_ingestion_body(
     settings: Settings,
     *,
     dry_run: bool = False,
     force: bool = False,
+    store: KnowledgeStore | None = None,
+    heartbeat: _RefreshHeartbeat | None = None,
 ) -> dict[str, object]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=settings.transcript_days)
-    store = None if dry_run else KnowledgeStore(settings)
+    if dry_run:
+        store = None
+    elif store is None:
+        store = KnowledgeStore(settings)
     report: dict[str, object] = {
         "mode": "dry-run" if dry_run else ("full" if force else "incremental"),
         "cutoff": cutoff.isoformat().replace("+00:00", "Z"),
@@ -54,6 +111,8 @@ def run_ingestion(
     source_reports: dict[str, object] = report["sources"]  # type: ignore[assignment]
 
     for source, scanner in _scanners(settings):
+        if heartbeat:
+            heartbeat.set_source(source)
         if store:
             store.record_ingest_start(source)
         try:
@@ -158,7 +217,81 @@ def run_ingestion(
                 "status": "failed",
                 "error": _safe_error(f"Vector maintenance failed: {exc}"),
             }
+        if settings.canary_run_after_refresh:
+            if not settings.canary_suite_path.exists():
+                report["quality_gate"] = {
+                    "status": "skipped",
+                    "reason": "canary_suite_missing",
+                }
+            else:
+                try:
+                    from quality import evaluate_canary_suite
+
+                    canary = evaluate_canary_suite(
+                        store,
+                        settings.canary_suite_path,
+                        record=True,
+                    )
+                    report["quality_gate"] = {
+                        "status": "passed" if canary["gate_passed"] else "failed",
+                        **canary,
+                    }
+                except Exception as exc:
+                    report["quality_gate"] = {
+                        "status": "failed",
+                        "error": _safe_error(f"Canary evaluation failed: {exc}"),
+                    }
     return report
+
+
+def run_ingestion(
+    settings: Settings,
+    *,
+    dry_run: bool = False,
+    force: bool = False,
+) -> dict[str, object]:
+    if dry_run:
+        return _run_ingestion_body(settings, dry_run=True, force=force)
+
+    store = KnowledgeStore(settings)
+    mode = "full" if force else "incremental"
+    lease = store.start_refresh_run(mode, lease_seconds=_REFRESH_LEASE_SECONDS)
+    heartbeat = _RefreshHeartbeat(store, lease)
+    heartbeat.start()
+    report: dict[str, object] | None = None
+    failure: str | None = None
+    try:
+        report = _run_ingestion_body(
+            settings,
+            dry_run=False,
+            force=force,
+            store=store,
+            heartbeat=heartbeat,
+        )
+        report["run_id"] = lease.run_id
+        return report
+    except Exception as exc:
+        failure = _safe_error(str(exc))
+        raise
+    finally:
+        heartbeat.stop()
+        if report is not None and heartbeat.last_error:
+            report["refresh_heartbeat_warning"] = heartbeat.last_error
+        try:
+            finalized = store.finish_refresh_run(
+                lease,
+                succeeded=bool(report and report.get("ok")) and failure is None,
+                report=report,
+                error=failure,
+            )
+            if report is not None and not finalized:
+                report["ok"] = False
+                report["status"] = "refresh_lease_lost"
+        except Exception as exc:
+            if report is not None:
+                report["ok"] = False
+                report["status"] = "refresh_finalize_failed"
+                report["refresh_finalize_error"] = _safe_error(str(exc))
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import heapq
 import json
@@ -12,11 +12,15 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
+import socket
 import sqlite3
 import statistics
 import threading
 import time
 from typing import Any, Iterable, Sequence
+import uuid
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -42,9 +46,17 @@ from runlock import distillation_lock
 from vector_index import UsearchVectorIndex, VectorIndexUnavailable
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _UTC = timezone.utc
 _SCHEMA_INITIALIZATION_LOCK = threading.Lock()
+_DEFAULT_REFRESH_LEASE_SECONDS = 30 * 60
+
+
+@dataclass(frozen=True)
+class RefreshLease:
+    run_id: str
+    token: str
+    expires_at: str
 
 
 @dataclass(frozen=True)
@@ -133,6 +145,42 @@ def stable_document_id(source: str, source_key: str) -> str:
 def stable_chunk_id(document_id: str, ordinal: int) -> str:
     digest = hashlib.sha256(f"{document_id}\0{ordinal}".encode("utf-8")).hexdigest()
     return f"chk_{digest[:32]}"
+
+
+def _stable_receipt_id(
+    artifact_type: str,
+    artifact_id: str,
+    content_hash: str,
+    producer: str,
+    producer_version: str,
+) -> str:
+    material = "\0".join(
+        (artifact_type, artifact_id, content_hash, producer, producer_version)
+    )
+    return f"rcpt_{hashlib.sha256(material.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+_EXECUTABLE_INSTRUCTION_RE = re.compile(
+    r"(?im)(?:^|\n)\s*(?:"
+    r"ignore\s+(?:all\s+)?previous|system\s*:|developer\s*:|"
+    r"run\s+(?:this|the following|powershell|cmd)|execute\s+(?:this|the following)|"
+    r"(?:sudo|powershell|cmd(?:\.exe)?|bash|sh)\s+[-/]|"
+    r"curl\s+https?://|invoke-expression\b"
+    r")"
+)
+
+
+def _content_taints(content: str, *, externally_processed: bool = False) -> list[str]:
+    taints = ["untrusted_evidence"]
+    if _EXECUTABLE_INSTRUCTION_RE.search(content):
+        taints.append("executable_instruction")
+    if externally_processed:
+        taints.append("externally_processed")
+    return taints
 
 
 def _redact_json_value(value: Any) -> Any:
@@ -423,6 +471,154 @@ class KnowledgeStore:
                     COMMIT;
                     """
                     )
+                    current = 2
+                if current < 3:
+                    connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+                    CREATE TABLE IF NOT EXISTS refresh_runs (
+                        run_id TEXT PRIMARY KEY,
+                        mode TEXT NOT NULL,
+                        owner_pid INTEGER NOT NULL,
+                        owner_host TEXT NOT NULL,
+                        lease_token_hash TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK(
+                            status IN ('running', 'succeeded', 'failed', 'abandoned')
+                        ),
+                        current_source TEXT,
+                        started_at TEXT NOT NULL,
+                        heartbeat_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        summary_json TEXT,
+                        last_error TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_refresh_runs_status
+                        ON refresh_runs(status, started_at);
+
+                    CREATE TABLE IF NOT EXISTS refresh_lease (
+                        id INTEGER PRIMARY KEY CHECK(id = 1),
+                        run_id TEXT NOT NULL REFERENCES refresh_runs(run_id) ON DELETE CASCADE,
+                        lease_token_hash TEXT NOT NULL,
+                        acquired_at TEXT NOT NULL,
+                        heartbeat_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS outbound_distillation_audit (
+                        audit_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                        request_id TEXT NOT NULL UNIQUE,
+                        document_id TEXT,
+                        unit_input_hash TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        project TEXT,
+                        provider TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        endpoint_host TEXT NOT NULL,
+                        character_count INTEGER NOT NULL,
+                        decision TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        error_code TEXT,
+                        created_at TEXT NOT NULL,
+                        completed_at TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_outbound_audit_document
+                        ON outbound_distillation_audit(document_id, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_outbound_audit_status
+                        ON outbound_distillation_audit(decision, status, created_at);
+
+                    CREATE TABLE IF NOT EXISTS provenance_receipts (
+                        id TEXT PRIMARY KEY,
+                        artifact_type TEXT NOT NULL,
+                        artifact_id TEXT NOT NULL,
+                        document_id TEXT,
+                        source TEXT,
+                        project TEXT,
+                        content_hash TEXT NOT NULL,
+                        producer TEXT NOT NULL,
+                        producer_version TEXT NOT NULL,
+                        taints_json TEXT NOT NULL DEFAULT '[]',
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        superseded_at TEXT,
+                        UNIQUE(
+                            artifact_type, artifact_id, content_hash,
+                            producer, producer_version
+                        )
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_provenance_artifact
+                        ON provenance_receipts(artifact_type, artifact_id, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_provenance_document
+                        ON provenance_receipts(document_id, artifact_type);
+
+                    CREATE TABLE IF NOT EXISTS provenance_edges (
+                        parent_receipt_id TEXT NOT NULL
+                            REFERENCES provenance_receipts(id) ON DELETE CASCADE,
+                        child_receipt_id TEXT NOT NULL
+                            REFERENCES provenance_receipts(id) ON DELETE CASCADE,
+                        relation TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY(parent_receipt_id, child_receipt_id, relation)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS deletion_manifests (
+                        id TEXT PRIMARY KEY,
+                        document_id TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        source_key_hash TEXT NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        chunk_count INTEGER NOT NULL,
+                        distillation_count INTEGER NOT NULL,
+                        manifest_json TEXT NOT NULL,
+                        manifest_hash TEXT NOT NULL,
+                        deleted_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_deletion_manifests_document
+                        ON deletion_manifests(document_id, deleted_at);
+
+                    CREATE TABLE IF NOT EXISTS canary_runs (
+                        run_id TEXT PRIMARY KEY,
+                        suite_version TEXT NOT NULL,
+                        suite_hash TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        cases_total INTEGER NOT NULL DEFAULT 0,
+                        cases_passed INTEGER NOT NULL DEFAULT 0,
+                        p95_latency_ms REAL,
+                        report_json TEXT NOT NULL DEFAULT '{}'
+                    );
+                    CREATE TABLE IF NOT EXISTS canary_case_results (
+                        run_id TEXT NOT NULL REFERENCES canary_runs(run_id) ON DELETE CASCADE,
+                        case_id TEXT NOT NULL,
+                        passed INTEGER NOT NULL,
+                        latency_ms REAL NOT NULL,
+                        result_json TEXT NOT NULL,
+                        PRIMARY KEY(run_id, case_id)
+                    );
+                    CREATE TABLE IF NOT EXISTS quality_gate_state (
+                        id INTEGER PRIMARY KEY CHECK(id = 1),
+                        status TEXT NOT NULL,
+                        suite_version TEXT,
+                        last_run_id TEXT,
+                        updated_at TEXT NOT NULL,
+                        detail_json TEXT NOT NULL DEFAULT '{}'
+                    );
+                    INSERT OR IGNORE INTO quality_gate_state(
+                        id, status, updated_at, detail_json
+                    ) VALUES (
+                        1, 'not_run',
+                        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        '{}'
+                    );
+
+                    INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+                    PRAGMA user_version = 3;
+                    COMMIT;
+                    """
+                    )
                 # Early v2 builds aggregated retry state at document level.
                 # This additive, idempotent repair gives existing v2 databases
                 # the required per-unit pending/failed state without changing
@@ -465,6 +661,213 @@ class KnowledgeStore:
                     FROM distillations;
                     """
                 )
+                self._backfill_provenance(connection)
+
+    @staticmethod
+    def _insert_provenance_receipt(
+        connection: sqlite3.Connection,
+        *,
+        artifact_type: str,
+        artifact_id: str,
+        document_id: str | None,
+        source: str | None,
+        project: str | None,
+        content_hash: str,
+        producer: str,
+        producer_version: str,
+        taints: Sequence[str],
+        metadata: dict[str, Any] | None = None,
+        parent_receipt_ids: Sequence[str] = (),
+    ) -> str:
+        receipt_id = _stable_receipt_id(
+            artifact_type,
+            artifact_id,
+            content_hash,
+            producer,
+            producer_version,
+        )
+        now = _iso(None)
+        connection.execute(
+            """
+            UPDATE provenance_receipts
+            SET superseded_at = COALESCE(superseded_at, ?)
+            WHERE artifact_type = ? AND artifact_id = ? AND id <> ?
+              AND superseded_at IS NULL
+            """,
+            (now, artifact_type, artifact_id, receipt_id),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO provenance_receipts(
+                id, artifact_type, artifact_id, document_id, source, project,
+                content_hash, producer, producer_version, taints_json,
+                metadata_json, created_at, superseded_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                receipt_id,
+                artifact_type,
+                artifact_id,
+                document_id,
+                source,
+                project,
+                content_hash,
+                producer,
+                producer_version,
+                json.dumps(sorted(set(taints)), ensure_ascii=False),
+                json.dumps(
+                    _redact_json_value(metadata or {}),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                now,
+            ),
+        )
+        for parent_receipt_id in parent_receipt_ids:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO provenance_edges(
+                    parent_receipt_id, child_receipt_id, relation, created_at
+                ) VALUES (?, ?, 'derived_from', ?)
+                """,
+                (parent_receipt_id, receipt_id, now),
+            )
+        return receipt_id
+
+    def _backfill_provenance(self, connection: sqlite3.Connection) -> None:
+        self._supersede_orphaned_provenance(connection)
+        expected = int(connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
+        expected += int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        expected += int(connection.execute("SELECT COUNT(*) FROM distillations").fetchone()[0])
+        present = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) FROM provenance_receipts
+                WHERE artifact_type IN ('document', 'chunk', 'distillation')
+                  AND superseded_at IS NULL
+                """
+            ).fetchone()[0]
+        )
+        if present >= expected:
+            return
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            document_receipts: dict[str, str] = {}
+            document_rows = connection.execute(
+                """
+                SELECT id, source, project, content_hash, metadata_json
+                FROM documents ORDER BY id
+                """
+            ).fetchall()
+            for row in document_rows:
+                document_id = str(row["id"])
+                document_receipts[document_id] = self._insert_provenance_receipt(
+                    connection,
+                    artifact_type="document",
+                    artifact_id=document_id,
+                    document_id=document_id,
+                    source=str(row["source"]),
+                    project=row["project"],
+                    content_hash=str(row["content_hash"]),
+                    producer=f"ingest:{row['source']}",
+                    producer_version="schema-v3",
+                    taints=["untrusted_evidence"],
+                    metadata={"backfilled": True},
+                )
+
+            for row in connection.execute(
+                """
+                SELECT c.id, c.document_id, c.content_hash, c.content,
+                       d.source, d.project
+                FROM chunks c JOIN documents d ON d.id = c.document_id
+                ORDER BY c.document_id, c.ordinal
+                """
+            ):
+                document_id = str(row["document_id"])
+                self._insert_provenance_receipt(
+                    connection,
+                    artifact_type="chunk",
+                    artifact_id=str(row["id"]),
+                    document_id=document_id,
+                    source=str(row["source"]),
+                    project=row["project"],
+                    content_hash=str(row["content_hash"]),
+                    producer="paragraph_chunker",
+                    producer_version=(
+                        f"{self.settings.chunk_size}:{self.settings.chunk_overlap}:schema-v3"
+                    ),
+                    taints=_content_taints(str(row["content"])),
+                    metadata={"backfilled": True},
+                    parent_receipt_ids=[document_receipts[document_id]],
+                )
+
+            for row in connection.execute(
+                """
+                SELECT x.id, x.document_id, x.input_hash, x.search_text,
+                       x.distiller_model, x.prompt_version, d.source, d.project
+                FROM distillations x JOIN documents d ON d.id = x.document_id
+                ORDER BY x.document_id, x.unit_ordinal
+                """
+            ):
+                document_id = str(row["document_id"])
+                self._insert_provenance_receipt(
+                    connection,
+                    artifact_type="distillation",
+                    artifact_id=str(row["id"]),
+                    document_id=document_id,
+                    source=str(row["source"]),
+                    project=row["project"],
+                    content_hash=hashlib.sha256(
+                        str(row["search_text"]).encode("utf-8")
+                    ).hexdigest(),
+                    producer=f"distiller:{row['distiller_model']}",
+                    producer_version=str(row["prompt_version"]),
+                    taints=_content_taints(
+                        str(row["search_text"]),
+                        externally_processed=True,
+                    ),
+                    metadata={
+                        "input_hash": str(row["input_hash"]),
+                        "backfilled": True,
+                    },
+                    parent_receipt_ids=[document_receipts[document_id]],
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _supersede_orphaned_provenance(connection: sqlite3.Connection) -> int:
+        cursor = connection.execute(
+            """
+            UPDATE provenance_receipts
+            SET superseded_at = ?
+            WHERE superseded_at IS NULL AND (
+                (
+                    artifact_type = 'document'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM documents d WHERE d.id = artifact_id
+                    )
+                )
+                OR (
+                    artifact_type = 'chunk'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM chunks c WHERE c.id = artifact_id
+                    )
+                )
+                OR (
+                    artifact_type = 'distillation'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM distillations x WHERE x.id = artifact_id
+                    )
+                )
+            )
+            """,
+            (_iso(None),),
+        )
+        return int(cursor.rowcount)
 
     def schema_version(self) -> int:
         with self._connect() as connection:
@@ -605,6 +1008,23 @@ class KnowledgeStore:
                                 item.document_id,
                             ),
                         )
+                        self._insert_provenance_receipt(
+                            connection,
+                            artifact_type="document",
+                            artifact_id=item.document_id,
+                            document_id=item.document_id,
+                            source=item.source,
+                            project=item.project,
+                            content_hash=item.content_hash,
+                            producer=f"ingest:{item.source}",
+                            producer_version="schema-v3",
+                            taints=_content_taints(item.text),
+                            metadata={
+                                "kind": item.kind,
+                                "timestamp": item.timestamp,
+                                "unchanged_refresh": True,
+                            },
+                        )
                         continue
                     connection.execute(
                         """
@@ -637,6 +1057,22 @@ class KnowledgeStore:
                             now,
                         ),
                     )
+                    document_receipt_id = self._insert_provenance_receipt(
+                        connection,
+                        artifact_type="document",
+                        artifact_id=item.document_id,
+                        document_id=item.document_id,
+                        source=item.source,
+                        project=item.project,
+                        content_hash=item.content_hash,
+                        producer=f"ingest:{item.source}",
+                        producer_version="schema-v3",
+                        taints=_content_taints(item.text),
+                        metadata={
+                            "kind": item.kind,
+                            "timestamp": item.timestamp,
+                        },
+                    )
                     # Preserve per-unit summaries for input-hash reuse after
                     # an appended transcript, but make them ineligible for
                     # retrieval until the current raw document is segmented
@@ -663,6 +1099,7 @@ class KnowledgeStore:
                         zip(item.pieces, item.vectors, strict=True)
                     ):
                         chunk_hash = hashlib.sha256(piece.encode("utf-8")).hexdigest()
+                        chunk_id = stable_chunk_id(item.document_id, ordinal)
                         connection.execute(
                             """
                             INSERT INTO chunks(
@@ -671,7 +1108,7 @@ class KnowledgeStore:
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
-                                stable_chunk_id(item.document_id, ordinal),
+                                chunk_id,
                                 item.document_id,
                                 ordinal,
                                 item.title,
@@ -683,7 +1120,25 @@ class KnowledgeStore:
                                 now,
                             ),
                         )
+                        self._insert_provenance_receipt(
+                            connection,
+                            artifact_type="chunk",
+                            artifact_id=chunk_id,
+                            document_id=item.document_id,
+                            source=item.source,
+                            project=item.project,
+                            content_hash=chunk_hash,
+                            producer="paragraph_chunker",
+                            producer_version=(
+                                f"{self.settings.chunk_size}:"
+                                f"{self.settings.chunk_overlap}:schema-v3"
+                            ),
+                            taints=_content_taints(piece),
+                            metadata={"ordinal": ordinal},
+                            parent_receipt_ids=[document_receipt_id],
+                        )
                     item.chunk_count = len(item.pieces)
+                self._supersede_orphaned_provenance(connection)
                 if any(not item.unchanged for item in prepared):
                     self._bump_vector_generation(connection)
                 connection.commit()
@@ -746,18 +1201,108 @@ class KnowledgeStore:
             "citation": f"cerebras-memory://document/{result.document_id}",
         }
 
+    def _record_deletion_manifest(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        reason: str,
+    ) -> str:
+        document_id = str(row["id"])
+        chunk_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM chunks WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()[0]
+        )
+        distillation_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM distillations WHERE document_id = ?",
+                (document_id,),
+            ).fetchone()[0]
+        )
+        deleted_at = _iso(None)
+        manifest = {
+            "document_id": document_id,
+            "source": str(row["source"]),
+            "source_key_hash": hashlib.sha256(
+                str(row["source_key"]).encode("utf-8")
+            ).hexdigest(),
+            "content_hash": str(row["content_hash"]),
+            "reason": redact_text(reason)[:100],
+            "chunk_count": chunk_count,
+            "distillation_count": distillation_count,
+            "deleted_at": deleted_at,
+        }
+        manifest_json = json.dumps(manifest, ensure_ascii=False, sort_keys=True)
+        manifest_hash = hashlib.sha256(manifest_json.encode("utf-8")).hexdigest()
+        manifest_id = f"del_{uuid.uuid4().hex}"
+        connection.execute(
+            """
+            INSERT INTO deletion_manifests(
+                id, document_id, source, source_key_hash, content_hash, reason,
+                chunk_count, distillation_count, manifest_json, manifest_hash,
+                deleted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                manifest_id,
+                document_id,
+                str(row["source"]),
+                manifest["source_key_hash"],
+                str(row["content_hash"]),
+                manifest["reason"],
+                chunk_count,
+                distillation_count,
+                manifest_json,
+                manifest_hash,
+                deleted_at,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE provenance_receipts
+            SET superseded_at = COALESCE(superseded_at, ?)
+            WHERE document_id = ? AND superseded_at IS NULL
+            """,
+            (deleted_at, document_id),
+        )
+        self._insert_provenance_receipt(
+            connection,
+            artifact_type="deletion_manifest",
+            artifact_id=manifest_id,
+            document_id=document_id,
+            source=str(row["source"]),
+            project=row["project"] if "project" in row.keys() else None,
+            content_hash=manifest_hash,
+            producer="administrative_delete",
+            producer_version="schema-v3",
+            taints=[],
+            metadata=manifest,
+        )
+        return manifest_id
+
     def forget_memory(self, memory_id: str) -> bool:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
-                    "SELECT kind FROM documents WHERE id = ?", (memory_id,)
+                    """
+                    SELECT id, source, source_key, kind, project, content_hash
+                    FROM documents WHERE id = ?
+                    """,
+                    (memory_id,),
                 ).fetchone()
                 if row is None:
                     connection.rollback()
                     return False
                 if row["kind"] != "memory":
                     raise ValueError("Administrative forget only accepts an explicitly saved memory ID")
+                self._record_deletion_manifest(
+                    connection,
+                    row,
+                    reason="explicit_memory_forget",
+                )
                 connection.execute("DELETE FROM documents WHERE id = ?", (memory_id,))
                 self._bump_vector_generation(connection)
                 connection.commit()
@@ -777,6 +1322,24 @@ class KnowledgeStore:
                 connection.execute("CREATE TEMP TABLE IF NOT EXISTS scan_seen(source_key TEXT PRIMARY KEY)")
                 connection.execute("DELETE FROM scan_seen")
                 connection.executemany("INSERT OR IGNORE INTO scan_seen(source_key) VALUES (?)", safe_keys)
+                stale_rows = connection.execute(
+                    """
+                    SELECT id, source, source_key, kind, project, content_hash
+                    FROM documents
+                    WHERE source = ? AND kind = 'derived'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM scan_seen WHERE scan_seen.source_key = documents.source_key
+                      )
+                    ORDER BY id
+                    """,
+                    (safe_source,),
+                ).fetchall()
+                for row in stale_rows:
+                    self._record_deletion_manifest(
+                        connection,
+                        row,
+                        reason="source_reconciliation",
+                    )
                 cursor = connection.execute(
                     """
                     DELETE FROM documents
@@ -792,6 +1355,248 @@ class KnowledgeStore:
                     self._bump_vector_generation(connection)
                 connection.commit()
                 return deleted
+            except Exception:
+                connection.rollback()
+                raise
+
+    @staticmethod
+    def _expire_stale_refreshes(
+        connection: sqlite3.Connection,
+        *,
+        now: str,
+    ) -> int:
+        stale = connection.execute(
+            """
+            SELECT r.run_id
+            FROM refresh_runs r
+            JOIN refresh_lease l ON l.run_id = r.run_id
+            WHERE r.status = 'running' AND l.expires_at <= ?
+            """,
+            (now,),
+        ).fetchall()
+        run_ids = [str(row["run_id"]) for row in stale]
+        if run_ids:
+            placeholders = ",".join("?" for _ in run_ids)
+            connection.execute(
+                f"""
+                UPDATE refresh_runs
+                SET status = 'abandoned', completed_at = ?,
+                    last_error = 'refresh_lease_expired'
+                WHERE run_id IN ({placeholders}) AND status = 'running'
+                """,
+                [now, *run_ids],
+            )
+            connection.execute(
+                f"DELETE FROM refresh_lease WHERE run_id IN ({placeholders})",
+                run_ids,
+            )
+        active = connection.execute(
+            """
+            SELECT 1 FROM refresh_lease l
+            JOIN refresh_runs r ON r.run_id = l.run_id
+            WHERE r.status = 'running' AND l.expires_at > ?
+            LIMIT 1
+            """,
+            (now,),
+        ).fetchone()
+        orphaned_sources = 0
+        if active is None:
+            cursor = connection.execute(
+                """
+                UPDATE ingest_state
+                SET status = 'abandoned', last_failure_at = ?,
+                    failures = failures + 1,
+                    last_error = ?
+                WHERE status = 'running'
+                """,
+                (
+                    now,
+                    (
+                        "refresh_lease_expired"
+                        if run_ids
+                        else "orphaned_running_state_without_lease"
+                    ),
+                ),
+            )
+            orphaned_sources = int(cursor.rowcount)
+        return len(run_ids) or int(orphaned_sources > 0)
+
+    def recover_stale_refreshes(self) -> int:
+        now = _iso(None)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                recovered = self._expire_stale_refreshes(connection, now=now)
+                connection.commit()
+                return recovered
+            except Exception:
+                connection.rollback()
+                raise
+
+    def start_refresh_run(
+        self,
+        mode: str,
+        *,
+        lease_seconds: int = _DEFAULT_REFRESH_LEASE_SECONDS,
+    ) -> RefreshLease:
+        safe_mode = redact_text(mode).strip()[:40] or "incremental"
+        duration = max(60, int(lease_seconds))
+        now_dt = _utc_now()
+        now = _iso(now_dt)
+        expires_at = _iso(now_dt + timedelta(seconds=duration))
+        run_id = f"run_{uuid.uuid4().hex}"
+        token = secrets.token_urlsafe(32)
+        token_hash = _token_hash(token)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._expire_stale_refreshes(connection, now=now)
+                active = connection.execute(
+                    """
+                    SELECT r.run_id, r.owner_pid, r.owner_host, l.expires_at
+                    FROM refresh_lease l JOIN refresh_runs r ON r.run_id = l.run_id
+                    WHERE l.id = 1
+                    """
+                ).fetchone()
+                if active is not None:
+                    raise RuntimeError(
+                        "Another Cerebras Memory refresh owns the database lease "
+                        f"(run_id={active['run_id']}, pid={active['owner_pid']}, "
+                        f"host={active['owner_host']}, expires_at={active['expires_at']})"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO refresh_runs(
+                        run_id, mode, owner_pid, owner_host, lease_token_hash,
+                        status, started_at, heartbeat_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        safe_mode,
+                        os.getpid(),
+                        socket.gethostname()[:255],
+                        token_hash,
+                        now,
+                        now,
+                        expires_at,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO refresh_lease(
+                        id, run_id, lease_token_hash, acquired_at,
+                        heartbeat_at, expires_at
+                    ) VALUES (1, ?, ?, ?, ?, ?)
+                    """,
+                    (run_id, token_hash, now, now, expires_at),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return RefreshLease(run_id=run_id, token=token, expires_at=expires_at)
+
+    def heartbeat_refresh_run(
+        self,
+        lease: RefreshLease,
+        *,
+        current_source: str | None = None,
+        lease_seconds: int = _DEFAULT_REFRESH_LEASE_SECONDS,
+    ) -> str:
+        now_dt = _utc_now()
+        now = _iso(now_dt)
+        expires_at = _iso(now_dt + timedelta(seconds=max(60, int(lease_seconds))))
+        token_hash = _token_hash(lease.token)
+        safe_source = redact_text(current_source)[:100] if current_source else None
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    """
+                    UPDATE refresh_lease
+                    SET heartbeat_at = ?, expires_at = ?
+                    WHERE id = 1 AND run_id = ? AND lease_token_hash = ?
+                    """,
+                    (now, expires_at, lease.run_id, token_hash),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("Refresh database lease is no longer owned by this run")
+                connection.execute(
+                    """
+                    UPDATE refresh_runs
+                    SET heartbeat_at = ?, expires_at = ?, current_source = ?
+                    WHERE run_id = ? AND lease_token_hash = ? AND status = 'running'
+                    """,
+                    (now, expires_at, safe_source, lease.run_id, token_hash),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return expires_at
+
+    def finish_refresh_run(
+        self,
+        lease: RefreshLease,
+        *,
+        succeeded: bool,
+        report: dict[str, object] | None = None,
+        error: str | None = None,
+    ) -> bool:
+        now = _iso(None)
+        token_hash = _token_hash(lease.token)
+        status = "succeeded" if succeeded else "failed"
+        safe_error = (
+            redact_text(error).replace("\r", " ").replace("\n", " ")[:1000]
+            if error
+            else None
+        )
+        summary_json = json.dumps(
+            _redact_json_value(report or {}),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    """
+                    UPDATE refresh_runs
+                    SET status = ?, completed_at = ?, heartbeat_at = ?,
+                        summary_json = ?, last_error = ?
+                    WHERE run_id = ? AND lease_token_hash = ? AND status = 'running'
+                    """,
+                    (
+                        status,
+                        now,
+                        now,
+                        summary_json,
+                        safe_error,
+                        lease.run_id,
+                        token_hash,
+                    ),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM refresh_lease
+                    WHERE id = 1 AND run_id = ? AND lease_token_hash = ?
+                    """,
+                    (lease.run_id, token_hash),
+                )
+                if not succeeded:
+                    connection.execute(
+                        """
+                        UPDATE ingest_state
+                        SET status = 'failed', last_failure_at = ?,
+                            failures = failures + 1,
+                            last_error = COALESCE(?, 'refresh_failed')
+                        WHERE status = 'running'
+                        """,
+                        (now, safe_error),
+                    )
+                connection.commit()
+                return cursor.rowcount == 1
             except Exception:
                 connection.rollback()
                 raise
@@ -1382,6 +2187,63 @@ class KnowledgeStore:
                     """,
                     (ready, now, now, document_id),
                 )
+                document_row = connection.execute(
+                    "SELECT source, project FROM documents WHERE id = ?",
+                    (document_id,),
+                ).fetchone()
+                parent_rows = connection.execute(
+                    """
+                    SELECT id FROM provenance_receipts
+                    WHERE superseded_at IS NULL AND (
+                        (artifact_type = 'document' AND artifact_id = ?)
+                        OR (
+                            artifact_type = 'chunk' AND document_id = ?
+                            AND artifact_id IN (
+                                SELECT id FROM chunks
+                                WHERE document_id = ? AND ordinal BETWEEN ? AND ?
+                            )
+                        )
+                    )
+                    ORDER BY artifact_type, artifact_id
+                    """,
+                    (
+                        document_id,
+                        document_id,
+                        document_id,
+                        unit.start_ordinal,
+                        unit.end_ordinal,
+                    ),
+                ).fetchall()
+                taints = _content_taints(
+                    search_text,
+                    externally_processed=(
+                        self.settings.distillation.provider == "deepseek"
+                    ),
+                )
+                taints.append("generated_summary")
+                self._insert_provenance_receipt(
+                    connection,
+                    artifact_type="distillation",
+                    artifact_id=distillation_id,
+                    document_id=document_id,
+                    source=(
+                        str(document_row["source"]) if document_row is not None else None
+                    ),
+                    project=document_row["project"] if document_row is not None else None,
+                    content_hash=hashlib.sha256(
+                        search_text.encode("utf-8")
+                    ).hexdigest(),
+                    producer=f"distiller:{self.settings.distillation.model}",
+                    producer_version=self.settings.distillation.prompt_version,
+                    taints=taints,
+                    metadata={
+                        "input_hash": unit.input_hash,
+                        "start_ordinal": unit.start_ordinal,
+                        "end_ordinal": unit.end_ordinal,
+                        "provider": self.settings.distillation.provider,
+                    },
+                    parent_receipt_ids=[str(row["id"]) for row in parent_rows],
+                )
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -1525,6 +2387,361 @@ class KnowledgeStore:
         identifiers = [str(row["id"]) for row in qualifying]
         return identifiers[:limit] if limit is not None else identifiers
 
+    @staticmethod
+    def _project_matches(value: str | None, patterns: Sequence[str]) -> bool:
+        if not value:
+            return False
+        folded = value.casefold()
+        return any(folded == pattern.casefold() for pattern in patterns)
+
+    def _remote_distillation_decision(
+        self,
+        document: sqlite3.Row,
+    ) -> tuple[bool, str]:
+        settings = self.settings.distillation
+        if settings.provider != "deepseek":
+            return True, "local_provider"
+        if not settings.remote_policy_enabled:
+            return True, "policy_disabled"
+
+        source = str(document["source"]).casefold()
+        project = str(document["project"]).strip() if document["project"] else None
+        if source not in set(settings.remote_allow_sources):
+            return False, "source_not_allowed"
+        if self._project_matches(project, settings.remote_deny_projects):
+            return False, "project_denied"
+        if settings.remote_allow_projects and not self._project_matches(
+            project,
+            settings.remote_allow_projects,
+        ):
+            return False, "project_not_allowlisted"
+        if settings.block_unscoped_remote and not project:
+            return False, "unscoped_document"
+
+        labels = " ".join(
+            str(document[name] or "")
+            for name in ("project", "title", "uri", "source_key")
+        ).casefold()
+        for term in settings.sensitive_project_terms:
+            if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", labels):
+                return False, f"sensitive_project_term:{term}"
+        return True, "policy_allowed"
+
+    def _audit_distillation_request(
+        self,
+        *,
+        document_id: str,
+        unit: Any,
+        source: str,
+        project: str | None,
+        decision: str,
+        status: str,
+        error_code: str | None = None,
+    ) -> str | None:
+        if not self.settings.distillation.audit_remote_requests:
+            return None
+        if self.settings.distillation.provider != "deepseek":
+            return None
+        request_id = f"out_{uuid.uuid4().hex}"
+        endpoint_host = urlparse(self.settings.distillation.endpoint).hostname or "unknown"
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO outbound_distillation_audit(
+                    request_id, document_id, unit_input_hash, source, project,
+                    provider, model, endpoint_host, character_count,
+                    decision, status, error_code, created_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    request_id,
+                    document_id,
+                    unit.input_hash,
+                    source,
+                    project,
+                    self.settings.distillation.provider,
+                    self.settings.distillation.model,
+                    endpoint_host,
+                    len(unit.text),
+                    decision,
+                    status,
+                    redact_text(error_code)[:100] if error_code else None,
+                    _iso(None),
+                    _iso(None) if status != "pending" else None,
+                ),
+            )
+        return request_id
+
+    def _complete_distillation_audit(
+        self,
+        request_id: str | None,
+        *,
+        status: str,
+        error_code: str | None = None,
+    ) -> None:
+        if not request_id:
+            return
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE outbound_distillation_audit
+                SET status = ?, error_code = ?, completed_at = ?
+                WHERE request_id = ?
+                """,
+                (
+                    status,
+                    redact_text(error_code)[:100] if error_code else None,
+                    _iso(None),
+                    request_id,
+                ),
+            )
+
+    def _mark_distillation_blocked(
+        self,
+        document_id: str,
+        *,
+        units: Sequence[Any],
+        reason: str,
+        source: str,
+        project: str | None,
+    ) -> dict[str, Any]:
+        now = _iso(None)
+        safe_reason = redact_text(reason)[:200]
+        for unit in units:
+            self._audit_distillation_request(
+                document_id=document_id,
+                unit=unit,
+                source=source,
+                project=project,
+                decision="blocked",
+                status="blocked",
+                error_code=safe_reason,
+            )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO distillation_state(
+                        document_id, status, model, prompt_version, units_total,
+                        units_ready, failures, last_attempt_at, last_success_at, last_error
+                    ) VALUES (?, 'blocked', ?, ?, ?, 0, 0, ?, NULL, ?)
+                    ON CONFLICT(document_id) DO UPDATE SET
+                        status = 'blocked', model = excluded.model,
+                        prompt_version = excluded.prompt_version,
+                        units_total = excluded.units_total, units_ready = 0,
+                        failures = 0, last_attempt_at = excluded.last_attempt_at,
+                        last_success_at = NULL, last_error = excluded.last_error
+                    """,
+                    (
+                        document_id,
+                        self.settings.distillation.model,
+                        self.settings.distillation.prompt_version,
+                        len(units),
+                        now,
+                        safe_reason,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE distillation_unit_state
+                    SET status = 'pending', last_error = ?
+                    WHERE document_id = ?
+                    """,
+                    (safe_reason, document_id),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "document_id": document_id,
+            "status": "blocked",
+            "reason": safe_reason,
+            "units": len(units),
+            "ready": 0,
+            "generated": 0,
+            "failures": 0,
+        }
+
+    def _finalize_distillation_document(
+        self,
+        document_id: str,
+        *,
+        units: Sequence[Any],
+        generated: Sequence[tuple[Any, dict[str, Any], str, np.ndarray, str]],
+        ready_ids: set[str],
+        unit_outcomes: Sequence[tuple[Any, str, str | None, int]],
+        failures: Sequence[str],
+    ) -> str:
+        now = _iso(None)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for unit, structured, search_text, vector, distillation_id in generated:
+                    connection.execute(
+                        """
+                        INSERT INTO distillations(
+                            id, document_id, unit_ordinal, input_hash, start_ordinal, end_ordinal,
+                            summary_json, search_text, embedding, embedding_model,
+                            embedding_dimensions, distiller_model, prompt_version, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            unit_ordinal = excluded.unit_ordinal,
+                            start_ordinal = excluded.start_ordinal,
+                            end_ordinal = excluded.end_ordinal,
+                            summary_json = excluded.summary_json,
+                            search_text = excluded.search_text,
+                            embedding = excluded.embedding,
+                            embedding_model = excluded.embedding_model,
+                            embedding_dimensions = excluded.embedding_dimensions,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            distillation_id,
+                            document_id,
+                            unit.unit_ordinal,
+                            unit.input_hash,
+                            unit.start_ordinal,
+                            unit.end_ordinal,
+                            json.dumps(structured, ensure_ascii=False, sort_keys=True),
+                            search_text,
+                            np.asarray(vector, dtype=np.float32).tobytes(),
+                            self.embedder.model_name,
+                            self.embedder.dimensions,
+                            self.settings.distillation.model,
+                            self.settings.distillation.prompt_version,
+                            now,
+                            now,
+                        ),
+                    )
+                if ready_ids:
+                    placeholders = ",".join("?" for _ in ready_ids)
+                    connection.execute(
+                        f"""
+                        DELETE FROM distillations
+                        WHERE document_id = ? AND id NOT IN ({placeholders})
+                        """,
+                        [document_id, *sorted(ready_ids)],
+                    )
+                else:
+                    connection.execute(
+                        "DELETE FROM distillations WHERE document_id = ?",
+                        (document_id,),
+                    )
+                connection.execute(
+                    """
+                    UPDATE provenance_receipts
+                    SET superseded_at = ?
+                    WHERE artifact_type = 'distillation'
+                      AND document_id = ? AND superseded_at IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM distillations x
+                          WHERE x.id = provenance_receipts.artifact_id
+                      )
+                    """,
+                    (now, document_id),
+                )
+                input_hashes = [unit.input_hash for unit in units]
+                placeholders = ",".join("?" for _ in input_hashes)
+                connection.execute(
+                    f"""
+                    DELETE FROM distillation_unit_state
+                    WHERE document_id = ? AND (
+                        distiller_model <> ? OR prompt_version <> ?
+                        OR input_hash NOT IN ({placeholders})
+                    )
+                    """,
+                    [
+                        document_id,
+                        self.settings.distillation.model,
+                        self.settings.distillation.prompt_version,
+                        *input_hashes,
+                    ],
+                )
+                for unit, unit_status, unit_error, attempts in unit_outcomes:
+                    connection.execute(
+                        """
+                        INSERT INTO distillation_unit_state(
+                            document_id, input_hash, unit_ordinal, start_ordinal, end_ordinal,
+                            distiller_model, prompt_version, status, attempts,
+                            last_attempt_at, last_success_at, last_error
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(document_id, input_hash, distiller_model, prompt_version)
+                        DO UPDATE SET
+                            unit_ordinal = excluded.unit_ordinal,
+                            start_ordinal = excluded.start_ordinal,
+                            end_ordinal = excluded.end_ordinal,
+                            status = excluded.status,
+                            attempts = distillation_unit_state.attempts + excluded.attempts,
+                            last_attempt_at = CASE
+                                WHEN excluded.attempts > 0 THEN excluded.last_attempt_at
+                                ELSE distillation_unit_state.last_attempt_at
+                            END,
+                            last_success_at = CASE
+                                WHEN excluded.status = 'ready' THEN excluded.last_success_at
+                                ELSE distillation_unit_state.last_success_at
+                            END,
+                            last_error = excluded.last_error
+                        """,
+                        (
+                            document_id,
+                            unit.input_hash,
+                            unit.unit_ordinal,
+                            unit.start_ordinal,
+                            unit.end_ordinal,
+                            self.settings.distillation.model,
+                            self.settings.distillation.prompt_version,
+                            unit_status,
+                            attempts,
+                            now if attempts else None,
+                            now if unit_status == "ready" else None,
+                            unit_error,
+                        ),
+                    )
+                ready = len(ready_ids)
+                total = len(units)
+                status = (
+                    "ready"
+                    if ready == total and not failures
+                    else ("partial" if ready else "failed")
+                )
+                connection.execute(
+                    """
+                    INSERT INTO distillation_state(
+                        document_id, status, model, prompt_version, units_total, units_ready,
+                        failures, last_attempt_at, last_success_at, last_error
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(document_id) DO UPDATE SET
+                        status = excluded.status,
+                        model = excluded.model,
+                        prompt_version = excluded.prompt_version,
+                        units_total = excluded.units_total,
+                        units_ready = excluded.units_ready,
+                        failures = excluded.failures,
+                        last_attempt_at = excluded.last_attempt_at,
+                        last_success_at = excluded.last_success_at,
+                        last_error = excluded.last_error
+                    """,
+                    (
+                        document_id,
+                        status,
+                        self.settings.distillation.model,
+                        self.settings.distillation.prompt_version,
+                        total,
+                        ready,
+                        len(failures),
+                        now,
+                        now if status == "ready" else None,
+                        failures[0] if failures else None,
+                    ),
+                )
+                connection.commit()
+                return status
+            except Exception:
+                connection.rollback()
+                raise
+
     def distill_document(
         self,
         document_id: str,
@@ -1534,7 +2751,10 @@ class KnowledgeStore:
     ) -> dict[str, Any]:
         with self._connect() as connection:
             document = connection.execute(
-                "SELECT source, metadata_json FROM documents WHERE id = ? AND kind = 'derived'",
+                """
+                SELECT source, source_key, title, uri, project, metadata_json
+                FROM documents WHERE id = ? AND kind = 'derived'
+                """,
                 (document_id,),
             ).fetchone()
             chunks = connection.execute(
@@ -1552,6 +2772,14 @@ class KnowledgeStore:
                     self.settings.distillation.prompt_version,
                 ),
             ).fetchall()
+            existing_state = connection.execute(
+                """
+                SELECT status, model, prompt_version, units_total, units_ready,
+                       last_error
+                FROM distillation_state WHERE document_id = ?
+                """,
+                (document_id,),
+            ).fetchone()
         if document is None or document["source"] not in AGENT_SOURCES:
             return {"document_id": document_id, "status": "ineligible", "units": 0}
         metadata = json.loads(document["metadata_json"] or "{}")
@@ -1566,6 +2794,34 @@ class KnowledgeStore:
         units = segment_dialogue(body, spans, self.settings.distillation)
         if not units:
             return {"document_id": document_id, "status": "no_dialogue", "units": 0}
+        allowed, policy_reason = self._remote_distillation_decision(document)
+        if not allowed:
+            if (
+                existing_state is not None
+                and existing_state["status"] == "blocked"
+                and existing_state["model"] == self.settings.distillation.model
+                and existing_state["prompt_version"]
+                == self.settings.distillation.prompt_version
+                and existing_state["last_error"] == policy_reason
+                and int(existing_state["units_total"]) == len(units)
+            ):
+                return {
+                    "document_id": document_id,
+                    "status": "blocked",
+                    "reason": policy_reason,
+                    "units": len(units),
+                    "ready": 0,
+                    "generated": 0,
+                    "failures": 0,
+                    "cached": True,
+                }
+            return self._mark_distillation_blocked(
+                document_id,
+                units=units,
+                reason=policy_reason,
+                source=str(document["source"]),
+                project=str(document["project"]) if document["project"] else None,
+            )
 
         existing = {
             row["input_hash"]: row
@@ -1573,6 +2829,27 @@ class KnowledgeStore:
             if row["embedding_model"] == self.embedder.model_name
             and int(row["embedding_dimensions"]) == self.embedder.dimensions
         }
+        if (
+            not force
+            and not force_input_hashes
+            and existing_state is not None
+            and existing_state["status"] == "ready"
+            and existing_state["model"] == self.settings.distillation.model
+            and existing_state["prompt_version"]
+            == self.settings.distillation.prompt_version
+            and int(existing_state["units_total"]) == len(units)
+            and int(existing_state["units_ready"]) == len(units)
+            and all(unit.input_hash in existing for unit in units)
+        ):
+            return {
+                "document_id": document_id,
+                "status": "ready",
+                "units": len(units),
+                "ready": len(units),
+                "generated": 0,
+                "failures": 0,
+                "cached": True,
+            }
         self._prepare_distillation_run(document_id, units, existing, force=force)
         ready_ids: set[str] = set()
         generated: list[tuple[Any, dict[str, Any], str, np.ndarray, str]] = []
@@ -1636,9 +2913,27 @@ class KnowledgeStore:
             failures.append(error)
             unit_outcomes.append((unit, "failed", error, 1))
 
-        def call_distiller(text: str) -> dict[str, Any]:
-            with self._distillation_request_slots:
-                return self.distiller.distill(text)
+        def call_distiller(unit: Any) -> dict[str, Any]:
+            request_id = self._audit_distillation_request(
+                document_id=document_id,
+                unit=unit,
+                source=str(document["source"]),
+                project=str(document["project"]) if document["project"] else None,
+                decision="allowed",
+                status="pending",
+            )
+            try:
+                with self._distillation_request_slots:
+                    result = self.distiller.distill(unit.text)
+                self._complete_distillation_audit(request_id, status="succeeded")
+                return result
+            except Exception as exc:
+                self._complete_distillation_audit(
+                    request_id,
+                    status="failed",
+                    error_code=type(exc).__name__,
+                )
+                raise
 
         concurrency = min(
             self.settings.distillation.max_concurrent_requests,
@@ -1653,7 +2948,7 @@ class KnowledgeStore:
                     unit_outcomes.append((unit, "pending", error, 0))
                     continue
                 try:
-                    checkpoint_generated(unit, call_distiller(unit.text))
+                    checkpoint_generated(unit, call_distiller(unit))
                 except DistillationUnavailable as exc:
                     unavailable = True
                     record_unavailable(unit, exc)
@@ -1665,7 +2960,7 @@ class KnowledgeStore:
                 thread_name_prefix="kb-distill",
             ) as executor:
                 futures = {
-                    executor.submit(call_distiller, unit.text): unit
+                    executor.submit(call_distiller, unit): unit
                     for unit in pending_units
                 }
                 provider_unavailable = False
@@ -1699,151 +2994,14 @@ class KnowledgeStore:
                             failures.append(error)
                             unit_outcomes.append((unit, "pending", error, 0))
 
-        now = _iso(None)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                for unit, structured, search_text, vector, distillation_id in generated:
-                    connection.execute(
-                        """
-                        INSERT INTO distillations(
-                            id, document_id, unit_ordinal, input_hash, start_ordinal, end_ordinal,
-                            summary_json, search_text, embedding, embedding_model,
-                            embedding_dimensions, distiller_model, prompt_version, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(id) DO UPDATE SET
-                            unit_ordinal = excluded.unit_ordinal,
-                            start_ordinal = excluded.start_ordinal,
-                            end_ordinal = excluded.end_ordinal,
-                            summary_json = excluded.summary_json,
-                            search_text = excluded.search_text,
-                            embedding = excluded.embedding,
-                            embedding_model = excluded.embedding_model,
-                            embedding_dimensions = excluded.embedding_dimensions,
-                            updated_at = excluded.updated_at
-                        """,
-                        (
-                            distillation_id,
-                            document_id,
-                            unit.unit_ordinal,
-                            unit.input_hash,
-                            unit.start_ordinal,
-                            unit.end_ordinal,
-                            json.dumps(structured, ensure_ascii=False, sort_keys=True),
-                            search_text,
-                            np.asarray(vector, dtype=np.float32).tobytes(),
-                            self.embedder.model_name,
-                            self.embedder.dimensions,
-                            self.settings.distillation.model,
-                            self.settings.distillation.prompt_version,
-                            now,
-                            now,
-                        ),
-                    )
-                if ready_ids:
-                    placeholders = ",".join("?" for _ in ready_ids)
-                    connection.execute(
-                        f"DELETE FROM distillations WHERE document_id = ? AND id NOT IN ({placeholders})",
-                        [document_id, *sorted(ready_ids)],
-                    )
-                else:
-                    connection.execute(
-                        "DELETE FROM distillations WHERE document_id = ?", (document_id,)
-                    )
-                input_hashes = [unit.input_hash for unit in units]
-                placeholders = ",".join("?" for _ in input_hashes)
-                connection.execute(
-                    f"""
-                    DELETE FROM distillation_unit_state
-                    WHERE document_id = ? AND (
-                        distiller_model <> ? OR prompt_version <> ?
-                        OR input_hash NOT IN ({placeholders})
-                    )
-                    """,
-                    [
-                        document_id,
-                        self.settings.distillation.model,
-                        self.settings.distillation.prompt_version,
-                        *input_hashes,
-                    ],
-                )
-                for unit, unit_status, unit_error, attempts in unit_outcomes:
-                    connection.execute(
-                        """
-                        INSERT INTO distillation_unit_state(
-                            document_id, input_hash, unit_ordinal, start_ordinal, end_ordinal,
-                            distiller_model, prompt_version, status, attempts,
-                            last_attempt_at, last_success_at, last_error
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(document_id, input_hash, distiller_model, prompt_version)
-                        DO UPDATE SET
-                            unit_ordinal = excluded.unit_ordinal,
-                            start_ordinal = excluded.start_ordinal,
-                            end_ordinal = excluded.end_ordinal,
-                            status = excluded.status,
-                            attempts = distillation_unit_state.attempts + excluded.attempts,
-                            last_attempt_at = CASE
-                                WHEN excluded.attempts > 0 THEN excluded.last_attempt_at
-                                ELSE distillation_unit_state.last_attempt_at
-                            END,
-                            last_success_at = CASE
-                                WHEN excluded.status = 'ready' THEN excluded.last_success_at
-                                ELSE distillation_unit_state.last_success_at
-                            END,
-                            last_error = excluded.last_error
-                        """,
-                        (
-                            document_id,
-                            unit.input_hash,
-                            unit.unit_ordinal,
-                            unit.start_ordinal,
-                            unit.end_ordinal,
-                            self.settings.distillation.model,
-                            self.settings.distillation.prompt_version,
-                            unit_status,
-                            attempts,
-                            now if attempts else None,
-                            now if unit_status == "ready" else None,
-                            unit_error,
-                        ),
-                    )
-                ready = len(ready_ids)
-                total = len(units)
-                status = "ready" if ready == total and not failures else ("partial" if ready else "failed")
-                connection.execute(
-                    """
-                    INSERT INTO distillation_state(
-                        document_id, status, model, prompt_version, units_total, units_ready,
-                        failures, last_attempt_at, last_success_at, last_error
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(document_id) DO UPDATE SET
-                        status = excluded.status,
-                        model = excluded.model,
-                        prompt_version = excluded.prompt_version,
-                        units_total = excluded.units_total,
-                        units_ready = excluded.units_ready,
-                        failures = excluded.failures,
-                        last_attempt_at = excluded.last_attempt_at,
-                        last_success_at = excluded.last_success_at,
-                        last_error = excluded.last_error
-                    """,
-                    (
-                        document_id,
-                        status,
-                        self.settings.distillation.model,
-                        self.settings.distillation.prompt_version,
-                        total,
-                        ready,
-                        len(failures),
-                        now,
-                        now if status == "ready" else None,
-                        failures[0] if failures else None,
-                    ),
-                )
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
+        status = self._finalize_distillation_document(
+            document_id,
+            units=units,
+            generated=generated,
+            ready_ids=ready_ids,
+            unit_outcomes=unit_outcomes,
+            failures=failures,
+        )
         return {
             "document_id": document_id,
             "status": status,
@@ -1900,6 +3058,7 @@ class KnowledgeStore:
             "documents": len(reports),
             "ready": sum(report["status"] == "ready" for report in reports),
             "partial": sum(report["status"] == "partial" for report in reports),
+            "blocked": sum(report["status"] == "blocked" for report in reports),
             "failed": sum(report["status"] == "failed" for report in reports),
             "units": sum(int(report.get("units", 0)) for report in reports),
             "generated": sum(int(report.get("generated", 0)) for report in reports),
@@ -1932,6 +3091,22 @@ class KnowledgeStore:
                 FROM distillation_state
                 """
             ).fetchone()
+            blocked_units = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(SUM(units_total), 0)
+                    FROM distillation_state WHERE status = 'blocked'
+                    """
+                ).fetchone()[0]
+            )
+            nonblocked_gap = int(
+                connection.execute(
+                    """
+                    SELECT COALESCE(SUM(units_total - units_ready), 0)
+                    FROM distillation_state WHERE status <> 'blocked'
+                    """
+                ).fetchone()[0]
+            )
             unit_states = {
                 str(row["status"]): int(row["count"])
                 for row in connection.execute(
@@ -1942,6 +3117,21 @@ class KnowledgeStore:
                 )
             }
             tracked_units = sum(unit_states.values())
+            retryable_pending = max(
+                0,
+                unit_states.get("pending", 0) - blocked_units,
+            ) + unit_states.get("failed", 0)
+            effective_unit_states = dict(unit_states)
+            if blocked_units:
+                effective_unit_states["blocked"] = blocked_units
+                adjusted_pending = max(
+                    0,
+                    effective_unit_states.get("pending", 0) - blocked_units,
+                )
+                if adjusted_pending:
+                    effective_unit_states["pending"] = adjusted_pending
+                else:
+                    effective_unit_states.pop("pending", None)
             pilot_documents = int(
                 connection.execute(
                     "SELECT COUNT(*) FROM distillation_pilot_documents"
@@ -1976,6 +3166,33 @@ class KnowledgeStore:
                     ),
                 )
             }
+            outbound_status = {
+                str(row["status"]): int(row["count"])
+                for row in connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS count
+                    FROM outbound_distillation_audit GROUP BY status
+                    """
+                )
+            }
+            outbound_decisions = {
+                str(row["decision"]): int(row["count"])
+                for row in connection.execute(
+                    """
+                    SELECT decision, COUNT(*) AS count
+                    FROM outbound_distillation_audit GROUP BY decision
+                    """
+                )
+            }
+            last_outbound = connection.execute(
+                """
+                SELECT request_id, document_id, source, project, provider, model,
+                       endpoint_host, character_count, decision, status,
+                       error_code, created_at, completed_at
+                FROM outbound_distillation_audit
+                ORDER BY audit_pk DESC LIMIT 1
+                """
+            ).fetchone()
         return {
             "mode": self.settings.distillation.mode,
             "search_enabled": self.settings.distillation.mode == "on",
@@ -1992,16 +3209,30 @@ class KnowledgeStore:
             "documents": documents,
             "units_total": max(int(totals["units_total"]), tracked_units),
             "units_ready": unit_states.get("ready", int(totals["units_ready"])),
-            "units_pending": max(
-                unit_states.get("pending", 0) + unit_states.get("failed", 0),
-                int(totals["units_total"]) - int(totals["units_ready"]),
-            ),
+            "units_pending": max(retryable_pending, nonblocked_gap),
+            "units_blocked": blocked_units,
             "unit_failures": unit_states.get("failed", int(totals["failures"])),
-            "unit_states": unit_states,
+            "unit_states": effective_unit_states,
             "pilot_documents": pilot_documents,
             "pilot_units": pilot_units,
             "pilot_states": pilot_states,
             "states": states,
+            "remote_policy": {
+                "enabled": self.settings.distillation.remote_policy_enabled,
+                "allow_sources": list(self.settings.distillation.remote_allow_sources),
+                "allow_projects": list(self.settings.distillation.remote_allow_projects),
+                "deny_projects": list(self.settings.distillation.remote_deny_projects),
+                "sensitive_project_terms": list(
+                    self.settings.distillation.sensitive_project_terms
+                ),
+                "block_unscoped": self.settings.distillation.block_unscoped_remote,
+                "audit_requests": self.settings.distillation.audit_remote_requests,
+            },
+            "outbound_audit": {
+                "status_counts": outbound_status,
+                "decision_counts": outbound_decisions,
+                "last_request": dict(last_outbound) if last_outbound else None,
+            },
             "last_error": failure["last_error"] if failure else None,
         }
 
@@ -2318,6 +3549,38 @@ class KnowledgeStore:
             matched[chunk_key] = str(row["id"])
         return anchors, matched
 
+    def _active_provenance(
+        self,
+        artifact_ids: Iterable[str],
+    ) -> dict[str, dict[str, Any]]:
+        identifiers = sorted({str(value) for value in artifact_ids if value})
+        if not identifiers:
+            return {}
+        placeholders = ",".join("?" for _ in identifiers)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, artifact_id, artifact_type, taints_json, producer,
+                       producer_version, created_at
+                FROM provenance_receipts
+                WHERE superseded_at IS NULL
+                  AND artifact_id IN ({placeholders})
+                ORDER BY created_at, id
+                """,
+                identifiers,
+            ).fetchall()
+        return {
+            str(row["artifact_id"]): {
+                "receipt_id": str(row["id"]),
+                "artifact_type": str(row["artifact_type"]),
+                "producer": str(row["producer"]),
+                "producer_version": str(row["producer_version"]),
+                "taints": json.loads(row["taints_json"] or "[]"),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        }
+
     def search_response(
         self,
         query: str,
@@ -2585,8 +3848,24 @@ class KnowledgeStore:
                 str(item[0]["document_id"]),
             ),
         )
+        top_variants = ordered[:limit]
+        artifact_ids = {
+            str(row["chunk_id"])
+            for variant, _ in top_variants
+            for row in variant["rows"]
+        }
+        artifact_ids.update(
+            str(variant["document_id"]) for variant, _ in top_variants
+        )
+        artifact_ids.update(
+            str(distillation_match[int(variant["anchor"]["chunk_pk"])])
+            for variant, _ in top_variants
+            if int(variant["anchor"]["chunk_pk"]) in distillation_match
+            and distillation_match[int(variant["anchor"]["chunk_pk"])]
+        )
+        receipt_by_artifact = self._active_provenance(artifact_ids)
         results: list[dict[str, Any]] = []
-        for variant, rerank_score in ordered[:limit]:
+        for variant, rerank_score in top_variants:
             anchor = variant["anchor"]
             anchor_key = int(anchor["chunk_pk"])
             context_chunks = [
@@ -2599,6 +3878,7 @@ class KnowledgeStore:
                     ),
                     "anchor": int(row["ordinal"]) == int(anchor["ordinal"]),
                     "content_trust": "untrusted_evidence",
+                    "provenance": receipt_by_artifact.get(str(row["chunk_id"])),
                 }
                 for row in sorted(variant["rows"], key=lambda item: int(item["ordinal"]))
             ]
@@ -2611,6 +3891,8 @@ class KnowledgeStore:
             ]
             retrieval_score = float(variant["retrieval_score"])
             final_score = float(rerank_score) if reranker_applied and rerank_score is not None else retrieval_score
+            distillation_id = distillation_match.get(anchor_key)
+            anchor_receipt = receipt_by_artifact.get(str(anchor["chunk_id"]))
             results.append(
                 {
                     "snippet": "\n\n".join(chunk["snippet"] for chunk in context_chunks),
@@ -2622,7 +3904,7 @@ class KnowledgeStore:
                     "vector_rank": vector_rank.get(anchor_key),
                     "distillation_rank": distillation_rank.get(anchor_key),
                     "matched_via": matched_via,
-                    "distillation_id": distillation_match.get(anchor_key),
+                    "distillation_id": distillation_id,
                     "citation": (
                         f"cerebras-memory://document/{anchor['document_id']}?chunk={anchor['chunk_id']}"
                     ),
@@ -2638,6 +3920,22 @@ class KnowledgeStore:
                     "uri": anchor["uri"],
                     "metadata": json.loads(anchor["metadata_json"] or "{}"),
                     "content_trust": "untrusted_evidence",
+                    "taints": (
+                        list(anchor_receipt.get("taints", []))
+                        if anchor_receipt
+                        else ["untrusted_evidence"]
+                    ),
+                    "provenance": {
+                        "document": receipt_by_artifact.get(
+                            str(anchor["document_id"])
+                        ),
+                        "anchor_chunk": anchor_receipt,
+                        "distillation": (
+                            receipt_by_artifact.get(str(distillation_id))
+                            if distillation_id
+                            else None
+                        ),
+                    },
                 }
             )
         return {
@@ -2713,6 +4011,10 @@ class KnowledgeStore:
                 """,
                 (document_id, limit, offset),
             ).fetchall()
+        provenance = self._active_provenance(
+            [document_id, *[str(row["id"]) for row in chunks]]
+        )
+        document_receipt = provenance.get(document_id)
         return {
             "document": {
                 "document_id": document["id"],
@@ -2725,6 +4027,12 @@ class KnowledgeStore:
                 "metadata": json.loads(document["metadata_json"] or "{}"),
                 "citation": f"cerebras-memory://document/{document['id']}",
                 "content_trust": "untrusted_evidence",
+                "taints": (
+                    list(document_receipt.get("taints", []))
+                    if document_receipt
+                    else ["untrusted_evidence"]
+                ),
+                "provenance": document_receipt,
             },
             "chunks": [
                 {
@@ -2736,6 +4044,13 @@ class KnowledgeStore:
                         f"cerebras-memory://document/{document_id}?chunk={row['id']}"
                     ),
                     "content_trust": "untrusted_evidence",
+                    "taints": list(
+                        provenance.get(str(row["id"]), {}).get(
+                            "taints",
+                            ["untrusted_evidence"],
+                        )
+                    ),
+                    "provenance": provenance.get(str(row["id"])),
                 }
                 for row in chunks
             ],
@@ -2748,7 +4063,125 @@ class KnowledgeStore:
             },
         }
 
+    def record_canary_result(self, result: dict[str, Any]) -> str:
+        run_id = f"canary_{uuid.uuid4().hex}"
+        status = "passed" if bool(result.get("gate_passed")) else "failed"
+        safe_report = {
+            "suite_path": redact_text(str(result.get("suite_path") or "")),
+            "suite_version": str(result.get("suite_version") or ""),
+            "suite_hash": str(result.get("suite_hash") or ""),
+            "started_at": str(result.get("started_at") or ""),
+            "completed_at": str(result.get("completed_at") or ""),
+            "cases_total": int(result.get("cases_total") or 0),
+            "cases_passed": int(result.get("cases_passed") or 0),
+            "p95_latency_ms": float(result.get("p95_latency_ms") or 0.0),
+            "gate_passed": bool(result.get("gate_passed")),
+            "results": result.get("results") if isinstance(result.get("results"), list) else [],
+        }
+        report_json = json.dumps(
+            _redact_json_value(safe_report),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO canary_runs(
+                        run_id, suite_version, suite_hash, status, started_at,
+                        completed_at, cases_total, cases_passed, p95_latency_ms,
+                        report_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        safe_report["suite_version"],
+                        safe_report["suite_hash"],
+                        status,
+                        safe_report["started_at"] or _iso(None),
+                        safe_report["completed_at"] or _iso(None),
+                        safe_report["cases_total"],
+                        safe_report["cases_passed"],
+                        safe_report["p95_latency_ms"],
+                        report_json,
+                    ),
+                )
+                for case in safe_report["results"]:
+                    if not isinstance(case, dict):
+                        continue
+                    case_id = redact_text(str(case.get("case_id") or ""))[:200]
+                    if not case_id:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT INTO canary_case_results(
+                            run_id, case_id, passed, latency_ms, result_json
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            case_id,
+                            int(bool(case.get("passed"))),
+                            float(case.get("latency_ms") or 0.0),
+                            json.dumps(
+                                _redact_json_value(case),
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        ),
+                    )
+                connection.execute(
+                    """
+                    UPDATE quality_gate_state
+                    SET status = ?, suite_version = ?, last_run_id = ?,
+                        updated_at = ?, detail_json = ?
+                    WHERE id = 1
+                    """,
+                    (
+                        status,
+                        safe_report["suite_version"],
+                        run_id,
+                        _iso(None),
+                        json.dumps(
+                            {
+                                "cases_total": safe_report["cases_total"],
+                                "cases_passed": safe_report["cases_passed"],
+                                "p95_latency_ms": safe_report["p95_latency_ms"],
+                            },
+                            sort_keys=True,
+                        ),
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return run_id
+
+    def canary_status(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            gate = connection.execute(
+                "SELECT * FROM quality_gate_state WHERE id = 1"
+            ).fetchone()
+            latest = connection.execute(
+                """
+                SELECT run_id, suite_version, suite_hash, status, started_at,
+                       completed_at, cases_total, cases_passed, p95_latency_ms
+                FROM canary_runs ORDER BY started_at DESC LIMIT 1
+                """
+            ).fetchone()
+        return {
+            "suite_path": str(self.settings.canary_suite_path),
+            "suite_exists": self.settings.canary_suite_path.exists(),
+            "run_after_refresh": self.settings.canary_run_after_refresh,
+            "latency_threshold_ms": self.settings.canary_latency_threshold_ms,
+            "gate": dict(gate) if gate is not None else None,
+            "latest": dict(latest) if latest is not None else None,
+        }
+
     def stats(self) -> dict[str, Any]:
+        recovered_refreshes = self.recover_stale_refreshes()
         with self._connect() as connection:
             document_count = int(connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
             chunk_count = int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
@@ -2776,6 +4209,38 @@ class KnowledgeStore:
             latest_refresh = connection.execute(
                 "SELECT MAX(last_success_at) FROM ingest_state"
             ).fetchone()[0]
+            active_refresh = connection.execute(
+                """
+                SELECT r.run_id, r.mode, r.owner_pid, r.owner_host, r.status,
+                       r.current_source, r.started_at, r.heartbeat_at, r.expires_at
+                FROM refresh_lease l JOIN refresh_runs r ON r.run_id = l.run_id
+                WHERE l.id = 1 AND r.status = 'running' AND l.expires_at > ?
+                """,
+                (_iso(None),),
+            ).fetchone()
+            latest_run = connection.execute(
+                """
+                SELECT run_id, mode, owner_pid, owner_host, status, current_source,
+                       started_at, heartbeat_at, expires_at, completed_at, last_error
+                FROM refresh_runs ORDER BY started_at DESC LIMIT 1
+                """
+            ).fetchone()
+            provenance_counts = {
+                str(row["artifact_type"]): int(row["count"])
+                for row in connection.execute(
+                    """
+                    SELECT artifact_type, COUNT(*) AS count
+                    FROM provenance_receipts
+                    WHERE superseded_at IS NULL
+                    GROUP BY artifact_type
+                    """
+                )
+            }
+            deletion_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM deletion_manifests"
+                ).fetchone()[0]
+            )
         source_state = {
             row["source"]: {
                 "watermark": row["watermark"],
@@ -2806,6 +4271,7 @@ class KnowledgeStore:
         reranker_status = self.reranker.status()
         vector_status = self.vector_index_status()
         distillation_status = self.distillation_status()
+        canary_status = self.canary_status()
         return {
             "schema_version": self.schema_version(),
             "database_path": str(self.database_path),
@@ -2827,10 +4293,18 @@ class KnowledgeStore:
             "reranker": reranker_status,
             "vector_search": vector_status,
             "distillation": distillation_status,
+            "quality_gate": canary_status,
             "last_refresh": latest_refresh,
-            "refresh_in_progress": any(
-                state["status"] == "running" for state in source_state.values()
-            ),
+            "refresh_in_progress": active_refresh is not None,
+            "refresh": {
+                "active": dict(active_refresh) if active_refresh is not None else None,
+                "latest": dict(latest_run) if latest_run is not None else None,
+                "stale_runs_recovered": recovered_refreshes,
+            },
+            "provenance": {
+                "active_receipts": provenance_counts,
+                "deletion_manifests": deletion_count,
+            },
             "sources": source_state,
             "failures": {
                 source: state["last_error"]

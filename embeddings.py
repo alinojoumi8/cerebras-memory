@@ -44,7 +44,7 @@ class FastEmbedder:
             self._model = TextEmbedding(
                 model_name=self.model_name,
                 cache_dir=str(self.cache_dir),
-                threads=max(1, min(4, __import__("os").cpu_count() or 1)),
+                threads=max(1, min(2, __import__("os").cpu_count() or 1)),
                 lazy_load=True,
             )
         return self._model
@@ -88,14 +88,19 @@ class FastEmbedder:
         return vectors[0]
 
     def embed_for_ingestion(self, texts: Iterable[str]) -> list[np.ndarray]:
-        """Use bounded four-way data parallelism for offline source refreshes."""
+        """Embed offline refreshes in one bounded ONNX process.
+
+        FastEmbed's ``parallel`` option starts one full model process per
+        worker. On Windows each process can reserve multiple gigabytes, so
+        even a modest eight-way refresh can exhaust a desktop. A single
+        session with small batches is slower but keeps memory bounded and
+        still reuses the ONNX arena across the source.
+        """
 
         values = list(texts)
         if not values:
             return []
-        workers = min(8, max(1, (__import__("os").cpu_count() or 1) // 2))
-        parallel = workers if len(values) >= 64 else None
-        return self._embed_values(values, batch_size=32, parallel=parallel)
+        return self._embed_values(values, batch_size=16, parallel=None)
 
 
 class HashingEmbedder:

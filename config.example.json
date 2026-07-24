@@ -35,7 +35,8 @@
     "cache_dir": "data/models/reranker",
     "candidate_documents": 20,
     "max_length": 512,
-    "batch_size": 8
+    "batch_size": 8,
+    "intra_op_threads": 24
   },
   "vector_search": {
     "backend": "auto",
@@ -53,15 +54,39 @@
     "endpoint": "https://api.deepseek.com/beta",
     "model": "deepseek-v4-flash",
     "api_key_env": "DEEPSEEK_API_KEY",
-      "max_output_tokens": 1536,
-      "max_concurrent_requests": 4,
-      "prompt_version": "agent-dialogue-v5-deepseek-isolated-json-fallback",
+    "max_output_tokens": 1536,
+    "max_concurrent_requests": 4,
+    "prompt_version": "agent-dialogue-v5-deepseek-isolated-json-fallback",
     "timeout_seconds": 120,
     "min_messages": 8,
     "min_characters": 12000,
     "max_messages_per_unit": 12,
     "max_characters_per_unit": 24000,
     "gap_minutes": 30,
-    "pilot_per_source": 10
+    "pilot_per_source": 10,
+    "remote_policy": {
+      "enabled": true,
+      "allow_sources": ["hermes", "claude", "codex", "grok"],
+      "allow_projects": [],
+      "deny_projects": [],
+      "sensitive_project_terms": [
+        "legal",
+        "case",
+        "defence",
+        "defense",
+        "court",
+        "osc",
+        "disclosure",
+        "privileged",
+        "counsel"
+      ],
+      "block_unscoped": false,
+      "audit_requests": true
+    }
+  },
+  "quality": {
+    "canary_suite": "evaluation/canary-suite.json",
+    "run_after_refresh": true,
+    "latency_threshold_ms": 1500
   }
 }

@@ -96,10 +96,19 @@ def test_stdio_server_tools_annotations_calls_and_cross_process_visibility(tmp_p
                     result["document_id"] != document_id
                     for result in search.structuredContent["results"]
                 )
+                first_result = search.structuredContent["results"][0]
+                assert first_result["provenance"]["anchor_chunk"]["receipt_id"].startswith(
+                    "rcpt_"
+                )
+                assert "untrusted_evidence" in first_result["taints"]
                 fetched = await session.call_tool("kb_get", {"document_id": document_id})
                 assert fetched.structuredContent["found"] is True
+                assert fetched.structuredContent["document"]["provenance"][
+                    "receipt_id"
+                ].startswith("rcpt_")
                 stats = await session.call_tool("kb_stats", {})
                 assert stats.structuredContent["documents"] == 2
+                assert stats.structuredContent["schema_version"] == 3
 
     asyncio.run(exercise())
 

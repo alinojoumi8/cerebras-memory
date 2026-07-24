@@ -172,8 +172,11 @@ if (-not $SkipTask) {
     $trigger = New-ScheduledTaskTrigger -Daily -At '03:00'
     $settings = New-ScheduledTaskSettingsSet `
         -StartWhenAvailable `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -DontStopOnIdleEnd `
         -MultipleInstances IgnoreNew `
-        -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+        -ExecutionTimeLimit (New-TimeSpan -Hours 6)
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
     $task = New-ScheduledTask `

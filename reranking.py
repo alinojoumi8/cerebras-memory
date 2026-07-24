@@ -80,7 +80,10 @@ class FlashRankReranker:
                     import onnxruntime as ort
 
                     logical_cpus = max(1, os.cpu_count() or 1)
-                    threads = min(24, max(1, int(logical_cpus * 0.75)))
+                    threads = min(
+                        logical_cpus,
+                        self.settings.intra_op_threads,
+                    )
                     options = ort.SessionOptions()
                     options.intra_op_num_threads = threads
                     options.inter_op_num_threads = 1
@@ -171,7 +174,11 @@ class FlashRankReranker:
             "candidate_documents": self.settings.candidate_documents,
             "max_length": self.settings.max_length,
             "batch_size": self.settings.batch_size,
-            "intra_op_threads": self._intra_op_threads,
+            "intra_op_threads": (
+                self._intra_op_threads
+                if self._intra_op_threads is not None
+                else self.settings.intra_op_threads
+            ),
             "last_error": self._last_error,
         }
 
