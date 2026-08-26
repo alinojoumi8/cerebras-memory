@@ -7,11 +7,11 @@ matter which client launched it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -102,6 +102,11 @@ class Settings:
     canary_suite_path: Path
     canary_run_after_refresh: bool
     canary_latency_threshold_ms: float
+    # Resolved agent root -> machine label. Only roots belonging to another
+    # machine appear here; this machine's roots stay unlabelled so their
+    # document keys are unchanged. Defaulted so a single-machine configuration
+    # needs no new field at all.
+    agent_root_hosts: Mapping[str, str] = field(default_factory=dict)
 
     def ensure_runtime_directories(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,6 +121,44 @@ def _expand_path(value: str | Path, *, base: Path) -> Path:
     if not path.is_absolute():
         path = base / path
     return path.resolve()
+
+
+def _expand_agent_roots(entries: Any) -> tuple[tuple[Path, ...], dict[str, str]]:
+    """Resolve one source list of agent roots, allowing per-machine entries.
+
+    An entry is either a bare path, meaning this machine, or an object with
+    ``host`` and ``path``, meaning a directory synced here from another machine.
+    Returns the resolved paths plus a map of the ones that belong elsewhere.
+
+    The asymmetry is deliberate: this machine keeps the unqualified key space so
+    no stored document is re-keyed. Prefixing every key with a hostname would
+    change ``stable_document_id`` for all of them, forcing a full re-embed,
+    orphaning every distillation, and -- because the old keys would vanish from
+    the scan -- having ``reconcile_source`` delete the originals.
+    """
+
+    paths: list[Path] = []
+    hosts: dict[str, str] = {}
+    for entry in entries or []:
+        if isinstance(entry, str):
+            path, host = _expand_path(entry, base=PROJECT_ROOT), ""
+        elif isinstance(entry, dict):
+            if not entry.get("path"):
+                raise ValueError("an agent root object must have a path")
+            path = _expand_path(entry["path"], base=PROJECT_ROOT)
+            host = str(entry.get("host", "")).strip()
+            # Source keys are colon separated, so a host containing one could
+            # collide with a different machine and session pair.
+            if ":" in host:
+                raise ValueError(f"agent root host {host!r} must not contain a colon")
+        else:
+            raise ValueError(
+                "each agent root must be a path or an object with host and path"
+            )
+        paths.append(path)
+        if host:
+            hosts[str(path)] = host
+    return tuple(paths), hosts
 
 
 def _deep_update(target: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -342,6 +385,9 @@ def load_settings(path: str | Path | None = None) -> Settings:
         if bool(source_flags.get(name, False))
     )
     roots = raw.get("agent_roots", {})
+    claude_roots, claude_hosts = _expand_agent_roots(roots.get("claude", []))
+    codex_roots, codex_hosts = _expand_agent_roots(roots.get("codex", []))
+    grok_roots, grok_hosts = _expand_agent_roots(roots.get("grok", []))
     reranker = raw.get("reranker", {})
     vector_search = raw.get("vector_search", {})
     distillation = raw.get("distillation", {})
@@ -400,9 +446,10 @@ def load_settings(path: str | Path | None = None) -> Settings:
             default=max(2, (os.cpu_count() or 2) // 2),
         ),
         enabled_sources=enabled_sources,
-        claude_roots=tuple(_expand_path(p, base=PROJECT_ROOT) for p in roots.get("claude", [])),
-        codex_roots=tuple(_expand_path(p, base=PROJECT_ROOT) for p in roots.get("codex", [])),
-        grok_roots=tuple(_expand_path(p, base=PROJECT_ROOT) for p in roots.get("grok", [])),
+        claude_roots=claude_roots,
+        codex_roots=codex_roots,
+        grok_roots=grok_roots,
+        agent_root_hosts={**claude_hosts, **codex_hosts, **grok_hosts},
         hermes_command=str(raw.get("hermes_command", "hermes")),
         reranker=RerankerSettings(
             enabled=bool(reranker.get("enabled", True)),

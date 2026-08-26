@@ -75,7 +75,9 @@ def test_jsonl_files_is_satisfied_when_every_root_is_present(tmp_path):
     files, unavailable = _jsonl_files([first, second])
 
     assert unavailable is None
-    assert [path.name for path in files] == ["a.jsonl"]
+    # Files arrive paired with the machine that owns their root; an unlabelled
+    # root is this machine, which keeps the unqualified key space.
+    assert [(path.name, host) for path, host in files] == [("a.jsonl", "")]
 
 
 def test_an_unconfigured_source_is_not_silently_healthy(tmp_path):

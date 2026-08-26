@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import unquote
 
 from config import Settings
@@ -278,9 +278,25 @@ def _dedupe_documents(documents: Iterable[IngestDocument]) -> list[IngestDocumen
     return list(selected.values())
 
 
+def _session_key(host: str, session_id: str) -> str:
+    """Namespace a session key by machine, leaving this machine's keys alone.
+
+    ``stable_document_id`` hashes the source key, so two machines whose scanners
+    fall back to a filename or a positional index would produce the same id and
+    silently overwrite each other on upsert. Prefixing the host fixes that for
+    synced roots. This machine stays unprefixed on purpose: re-keying the
+    documents already stored would re-embed every chunk, orphan every
+    distillation, and have reconciliation delete the originals.
+    """
+
+    return f"session:{session_id}" if not host else f"session:{host}:{session_id}"
+
+
 def _jsonl_files(
-    roots: Iterable[Path], name: str = "*.jsonl"
-) -> tuple[list[Path], str | None]:
+    roots: Iterable[Path],
+    name: str = "*.jsonl",
+    hosts: Mapping[str, str] | None = None,
+) -> tuple[list[tuple[Path, str]], str | None]:
     """Return matching files, plus a reason when the roots cannot be trusted.
 
     A scan is only trustworthy if *every* declared root was readable. Reporting
@@ -302,22 +318,28 @@ def _jsonl_files(
     missing = [root for root in declared if not (root.exists() and root.is_dir())]
     if missing:
         return [], "history root unavailable: " + ", ".join(str(root) for root in missing)
-    files: set[Path] = set()
+    labels = hosts or {}
+    found: dict[Path, str] = {}
     for root in declared:
-        files.update(path for path in root.rglob(name) if path.is_file() and not path.is_symlink())
-    return sorted(files), None
+        host = labels.get(str(root), "")
+        for path in root.rglob(name):
+            if path.is_file() and not path.is_symlink():
+                # A file reachable through more than one root keeps the host of
+                # the first root that claimed it, so config order is the tiebreak.
+                found.setdefault(path, host)
+    return sorted(found.items()), None
 
 
 def scan_claude(settings: Settings, cutoff: datetime) -> ScanResult:
     result = ScanResult(source="claude")
-    files, unavailable = _jsonl_files(settings.claude_roots)
+    files, unavailable = _jsonl_files(settings.claude_roots, hosts=settings.agent_root_hosts)
     if unavailable:
         result.successful = False
         result.error = f"Claude {unavailable}"
         return result
     documents: list[IngestDocument] = []
     try:
-        for path in files:
+        for path, host in files:
             result.scanned += 1
             records, malformed = _read_jsonl(path)
             result.malformed += malformed
@@ -334,12 +356,12 @@ def scan_claude(settings: Settings, cutoff: datetime) -> ScanResult:
             cwd = next((record.get("cwd") for record in records if record.get("cwd")), None)
             document = _dialogue_document(
                 source="claude",
-                source_key=f"session:{session_id}",
+                source_key=_session_key(host, session_id),
                 title=f"Claude Code session {session_id}",
                 messages=messages,
                 project=_project_from_cwd(cwd) or path.parent.name,
                 uri=str(path.resolve()),
-                metadata={"session_id": session_id, "cwd": cwd},
+                metadata={"session_id": session_id, "cwd": cwd, "host": host or None},
             )
             if document:
                 documents.append(document)
@@ -361,14 +383,14 @@ def scan_claude(settings: Settings, cutoff: datetime) -> ScanResult:
 
 def scan_codex(settings: Settings, cutoff: datetime) -> ScanResult:
     result = ScanResult(source="codex")
-    files, unavailable = _jsonl_files(settings.codex_roots)
+    files, unavailable = _jsonl_files(settings.codex_roots, hosts=settings.agent_root_hosts)
     if unavailable:
         result.successful = False
         result.error = f"Codex {unavailable}"
         return result
     documents: list[IngestDocument] = []
     try:
-        for path in files:
+        for path, host in files:
             result.scanned += 1
             records, malformed = _read_jsonl(path)
             result.malformed += malformed
@@ -386,12 +408,12 @@ def scan_codex(settings: Settings, cutoff: datetime) -> ScanResult:
             cwd = session_meta.get("cwd")
             document = _dialogue_document(
                 source="codex",
-                source_key=f"session:{session_id}",
+                source_key=_session_key(host, session_id),
                 title=f"Codex session {session_id}",
                 messages=messages,
                 project=_project_from_cwd(cwd),
                 uri=str(path.resolve()),
-                metadata={"session_id": session_id, "cwd": cwd},
+                metadata={"session_id": session_id, "cwd": cwd, "host": host or None},
             )
             if document:
                 documents.append(document)
@@ -413,14 +435,14 @@ def scan_codex(settings: Settings, cutoff: datetime) -> ScanResult:
 
 def scan_grok(settings: Settings, cutoff: datetime) -> ScanResult:
     result = ScanResult(source="grok")
-    files, unavailable = _jsonl_files(settings.grok_roots, "updates.jsonl")
+    files, unavailable = _jsonl_files(settings.grok_roots, "updates.jsonl", hosts=settings.agent_root_hosts)
     if unavailable:
         result.successful = False
         result.error = f"Grok {unavailable}"
         return result
     documents: list[IngestDocument] = []
     try:
-        for path in files:
+        for path, host in files:
             result.scanned += 1
             records, malformed = _read_jsonl(path)
             result.malformed += malformed
@@ -435,12 +457,12 @@ def scan_grok(settings: Settings, cutoff: datetime) -> ScanResult:
             cwd = unquote(encoded_cwd)
             document = _dialogue_document(
                 source="grok",
-                source_key=f"session:{session_id}",
+                source_key=_session_key(host, session_id),
                 title=f"Grok session {session_id}",
                 messages=messages,
                 project=_project_from_cwd(cwd),
                 uri=str(path.resolve()),
-                metadata={"session_id": session_id, "cwd": cwd},
+                metadata={"session_id": session_id, "cwd": cwd, "host": host or None},
             )
             if document:
                 documents.append(document)
