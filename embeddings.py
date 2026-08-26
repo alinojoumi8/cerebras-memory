@@ -10,6 +10,7 @@ from collections import OrderedDict
 import hashlib
 from pathlib import Path
 import re
+import threading
 from typing import Iterable, Protocol
 
 import numpy as np
@@ -49,10 +50,23 @@ class FastEmbedder:
         self.query_prefix = query_prefix
         self.threads = max(1, int(threads))
         self._model = None
+        self._model_lock = threading.Lock()
         self._query_cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._cache_lock = threading.Lock()
 
     def _load(self):
-        if self._model is None:
+        # Double-checked locking, the same shape as ``FlashRankReranker._load``.
+        # The unlocked first read keeps steady-state calls lock-free; the lock
+        # makes a concurrent cold start build exactly one model. Two requests
+        # arriving together previously each constructed a ``TextEmbedding``, and
+        # because ``lazy_load=True`` defers session creation, they then raced
+        # inside FastEmbed's own loader. One STDIO client never hit this; one
+        # process serving several agents does.
+        if self._model is not None:
+            return self._model
+        with self._model_lock:
+            if self._model is not None:
+                return self._model
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             from fastembed import TextEmbedding
 
@@ -108,14 +122,23 @@ class FastEmbedder:
         Repeated and paginated searches otherwise pay a fresh ONNX forward pass
         every time. Callers treat vectors as read-only, so returning the cached
         array is safe.
+
+        Insert and eviction are held under one lock. ``next(iter(...))`` over an
+        ``OrderedDict`` another thread is mutating raises ``RuntimeError``, and
+        two threads evicting the same key raise ``KeyError``. Serial calls from a
+        single STDIO client never reached either branch concurrently.
         """
 
-        self._query_cache[text] = vector
-        while len(self._query_cache) > _QUERY_CACHE_SIZE:
-            self._query_cache.pop(next(iter(self._query_cache)))
+        with self._cache_lock:
+            self._query_cache[text] = vector
+            while len(self._query_cache) > _QUERY_CACHE_SIZE:
+                self._query_cache.pop(next(iter(self._query_cache)))
         return vector
 
     def embed_query(self, text: str) -> np.ndarray:
+        # Deliberately unlocked: a single ``dict.get`` is atomic under the GIL,
+        # and a lookup racing an eviction can only miss, which costs one extra
+        # forward pass rather than returning a wrong vector.
         cached = self._query_cache.get(text)
         if cached is not None:
             return cached

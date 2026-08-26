@@ -2469,6 +2469,65 @@ class KnowledgeStore:
             raise RerankerUnavailable("reranker_disabled")
         return warm()
 
+    def prewarm(self) -> dict[str, Any]:
+        """Pay the cold-start cost up front instead of inside a request.
+
+        A first search loads the ONNX embedding model, materializes the exact
+        vector snapshot over every stored embedding, and may load the reranker.
+        A desktop STDIO client absorbs that once at first use and nobody
+        notices.  A remote client pays it inside a request whose default
+        timeout is 30 seconds, so the first search after a restart fails rather
+        than merely being slow.
+
+        Each stage reports rather than raises: a process that cannot warm the
+        reranker should still start and serve exact search.
+        """
+
+        status: dict[str, Any] = {}
+
+        started = time.perf_counter()
+        try:
+            self.embedder.embed_query("warm")
+        except Exception as exc:  # noqa: BLE001 - warming is best effort
+            status["embedder"] = {"ok": False, "error": type(exc).__name__}
+        else:
+            status["embedder"] = {
+                "ok": True,
+                "model": self.embedder.model_name,
+                "ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+
+        started = time.perf_counter()
+        try:
+            with self._connect() as connection:
+                snapshot = self._load_exact_vector_snapshot(connection)
+        except Exception as exc:  # noqa: BLE001 - warming is best effort
+            status["vectors"] = {"ok": False, "error": type(exc).__name__}
+        else:
+            status["vectors"] = {
+                "ok": True,
+                "chunks": int(len(snapshot.keys)),
+                "generation": snapshot.generation,
+                "ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+
+        if not self.settings.reranker.enabled:
+            status["reranker"] = {"ok": True, "enabled": False}
+            return status
+
+        started = time.perf_counter()
+        try:
+            self.warm_reranker()
+        except Exception as exc:  # noqa: BLE001 - warming is best effort
+            status["reranker"] = {"ok": False, "error": type(exc).__name__}
+        else:
+            status["reranker"] = {
+                "ok": True,
+                "enabled": True,
+                "ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+        return status
+
     @staticmethod
     def _stable_distillation_id(
         document_id: str,
