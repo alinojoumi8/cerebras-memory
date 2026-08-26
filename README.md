@@ -188,7 +188,23 @@ schema version, so the overlay and any monitor can probe it.
 ### Registering a spoke
 
 A spoke needs no virtual environment and no scheduled task; only the URL and its
-own token.
+own token. The registration script has a `-Remote` mode that skips every local
+preflight, skips the refresh task, and registers the HTTP transport with each
+client CLI, preserving unrelated MCP entries exactly as the local mode does:
+
+```
+$env:CEREBRAS_MEMORY_HTTP_TOKEN = "<this machine's secret>"
+.\scripts\Register-CerebrasMemory.ps1 -Remote -HubUrl https://matrix.taila13ed8.ts.net/mcp
+```
+
+It refuses to run without `-HubUrl`, refuses to send a bearer token over
+plaintext http to anything but loopback, and refuses to run with the token
+environment variable unset. Codex is registered with `--bearer-token-env-var`,
+so on that client the secret is read from the environment and never written to
+`config.toml`. Hermes stays hub-only, because its history is exported through
+its own CLI rather than read from files.
+
+The resulting entry looks like this:
 
 ```json
 {
