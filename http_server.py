@@ -133,28 +133,41 @@ def authenticate(
     return tokens.get(digest)
 
 
-def tool_from_jsonrpc(body: bytes) -> str | None:
-    """Name the tool a JSON-RPC body invokes, if it invokes one.
+def call_from_jsonrpc(body: bytes) -> tuple[str | None, str | None]:
+    """Name the tool a JSON-RPC body invokes, and the query it passes.
 
-    Returns None for anything that is not a ``tools/call`` -- initialize,
-    notifications, ``tools/list`` -- and a sentinel when the call is one but its
-    name cannot be read, so an unreadable call fails closed rather than being
-    waved through as a non-call.
+    Returns ``(None, None)`` for anything that is not a ``tools/call`` --
+    initialize, notifications, ``tools/list`` -- and the sentinel when the call
+    is one but its name cannot be read, so an unreadable call fails closed
+    rather than being waved through as a non-call.
+
+    The query comes back so the audit can store a hash of it. The text itself is
+    never retained.
     """
 
     try:
         payload = json.loads(body.decode("utf-8"))
     except Exception:  # noqa: BLE001 - a malformed body invokes nothing
-        return None
+        return None, None
     messages = payload if isinstance(payload, list) else [payload]
     for message in messages:
         if not isinstance(message, dict) or message.get("method") != "tools/call":
             continue
         params = message.get("params")
-        if isinstance(params, dict) and isinstance(params.get("name"), str):
-            return params["name"]
-        return UNREADABLE_TOOL
-    return None
+        if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+            return UNREADABLE_TOOL, None
+        arguments = params.get("arguments")
+        query = None
+        if isinstance(arguments, dict) and isinstance(arguments.get("query"), str):
+            query = arguments["query"]
+        return params["name"], query
+    return None, None
+
+
+def tool_from_jsonrpc(body: bytes) -> str | None:
+    """Back-compatible view of :func:`call_from_jsonrpc`."""
+
+    return call_from_jsonrpc(body)[0]
 
 
 async def _drain(receive: Callable[[], Awaitable[dict]]) -> bytes:
@@ -211,6 +224,23 @@ async def _send_json(
     await send({"type": "http.response.body", "body": body})
 
 
+def _rejected_identity(header: str | None) -> ClientIdentity:
+    """Stand-in identity for a caller that failed the gate.
+
+    The fingerprint is the digest of whatever credential was presented, so one
+    wrong token retried many times is distinguishable from many different
+    guesses, and nothing reversible is stored. An absent header fingerprints as
+    "none".
+    """
+
+    _, _, presented = (header or "").partition(" ")
+    presented = presented.strip()
+    fingerprint = (
+        hashlib.sha256(presented.encode("utf-8")).hexdigest()[:12] if presented else "none"
+    )
+    return ClientIdentity(label="<rejected>", scope="ro", fingerprint=fingerprint)
+
+
 class BearerAuthMiddleware:
     """Authenticate, authorize, and audit every request before it reaches MCP.
 
@@ -247,27 +277,39 @@ class BearerAuthMiddleware:
 
         # TransportSecuritySettings guards the MCP mount; this covers every
         # other route with the same rule so nothing is left unprotected.
+        started = time.perf_counter()
+
         if self.allowed_hosts:
             host = headers.get("host", "").split(",")[0].strip().casefold()
             if host not in self.allowed_hosts:
+                await self._record(
+                    _rejected_identity(headers.get("authorization")), None, None, 421, started
+                )
                 await _send_json(send, 421, {"error": "misdirected_request"})
                 return
 
         identity = authenticate(headers.get("authorization"), self.tokens)
         if identity is None:
+            # A rejected request is the security-interesting one, so it is
+            # audited too. The caller has no label, but the fingerprint of what
+            # was presented is a safe, non-reversible handle.
+            await self._record(
+                _rejected_identity(headers.get("authorization")), None, None, 401, started
+            )
             await _send_json(send, 401, {"error": "unauthorized"})
             return
 
         tool: str | None = None
+        query: str | None = None
         if scope.get("method") == "POST":
             body = await _drain(receive)
-            tool = tool_from_jsonrpc(body)
+            tool, query = call_from_jsonrpc(body)
             if tool is not None and tool not in READ_ONLY_TOOLS and not identity.may_write:
+                await self._record(identity, tool, query, 403, started)
                 await _send_json(send, 403, {"error": "read_only_token", "tool": tool})
                 return
             receive = _replay(body, receive)
 
-        started = time.perf_counter()
         observed = {"status": 0}
 
         async def watched_send(message: dict) -> None:
@@ -278,27 +320,33 @@ class BearerAuthMiddleware:
         try:
             await self.app(scope, receive, watched_send)
         finally:
-            if self.audit:
-                await self._record(identity, tool, observed["status"], started)
+            await self._record(identity, tool, query, observed["status"], started)
 
     async def _record(
         self,
         identity: ClientIdentity,
         tool: str | None,
+        query: str | None,
         status: int,
         started: float,
     ) -> None:
+        if not self.audit:
+            return
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
         healthy = 200 <= status < 400
         try:
+            store = _store()
             await anyio.to_thread.run_sync(
-                lambda: _store().record_access(
+                lambda: store.record_access(
                     client_label=identity.label,
                     token_fingerprint=identity.fingerprint,
                     transport="mcp_http",
                     # A request that calls no tool is still worth recording: it
                     # is how a session opens, and it attributes the connection.
                     tool=tool or "session",
+                    # A hash, never the text. An audit that kept the query would
+                    # be a second unredacted copy of everything anyone searched.
+                    query_hash=store.access_query_hash(query) if query else None,
                     status="ok" if healthy else "error",
                     latency_ms=latency_ms,
                     error_code=None if healthy else str(status),

@@ -339,3 +339,79 @@ def test_access_is_audited_without_recording_the_query(hub, tmp_path):
     assert secret_phrase not in json.dumps(rows)
     # Nor may it contain the credential.
     assert SECRET not in json.dumps(rows)
+
+
+def test_rejected_requests_are_audited(hub, tmp_path):
+    """A failed attempt is the security-interesting one and must be recorded."""
+
+    import sqlite3
+
+    wrong = "x" * 48
+    httpx.post(
+        f"{hub}/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={"Authorization": f"Bearer {wrong}"},
+        timeout=15.0,
+    )
+    httpx.post(
+        f"{hub}/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        timeout=15.0,
+    )
+
+    connection = sqlite3.connect(f"file:{tmp_path / 'hub.sqlite3'}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    rows = [
+        dict(row)
+        for row in connection.execute(
+            "SELECT * FROM access_audit WHERE client_label = '<rejected>'"
+        )
+    ]
+    connection.close()
+
+    assert len(rows) == 2
+    assert {row["error_code"] for row in rows} == {"401"}
+    assert all(row["status"] == "error" for row in rows)
+    # A presented credential and an absent one are distinguishable, and neither
+    # is stored in a reversible form.
+    fingerprints = {row["token_fingerprint"] for row in rows}
+    assert "none" in fingerprints
+    assert len(fingerprints) == 2
+    assert wrong not in json.dumps(rows)
+
+
+def test_a_search_records_a_query_hash_and_not_the_query(hub, tmp_path):
+    import sqlite3
+
+    headers = {"Authorization": f"Bearer {SECRET}"}
+    phrase = "distinctive-audit-probe-phrase"
+
+    async def exercise():
+        async with streamablehttp_client(f"{hub}/mcp", headers=headers) as (
+            reader,
+            writer,
+            _,
+        ):
+            async with ClientSession(reader, writer) as session:
+                await session.initialize()
+                await session.call_tool(
+                    "kb_search", {"query": phrase, "global_search": True}
+                )
+
+    _run(exercise())
+
+    connection = sqlite3.connect(f"file:{tmp_path / 'hub.sqlite3'}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    rows = [
+        dict(row)
+        for row in connection.execute(
+            "SELECT * FROM access_audit WHERE tool = 'kb_search'"
+        )
+    ]
+    connection.close()
+
+    assert rows, "expected the search to be audited"
+    hashes = {row["query_hash"] for row in rows}
+    assert hashes and None not in hashes, "query_hash must be populated"
+    assert all(len(value) == 32 for value in hashes)
+    assert phrase not in json.dumps(rows)
