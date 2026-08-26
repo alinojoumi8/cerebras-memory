@@ -41,6 +41,58 @@ detonated by it, so they are fixed first and standalone (Phases 1 and 3).
 
 ---
 
+---
+
+## Execution status (updated 2026-08-26)
+
+Branch `feat/remote-access`, off `kb-upgrade-phases-0-4`. Suite: **184 passed**
+(baseline was 125). `mcp_server.py` is byte-identical to its committed state.
+
+| Phase | State | Notes |
+|---|---|---|
+| 0 Stabilize | done | Pre-existing work checkpointed; 605 MB `VACUUM INTO` backup; stale `index_path` corrected. The stalled refresh was diagnosed as a **missing scheduled task**, not a code fault: `CerebrasMemoryRefresh` no longer exists, the last real run succeeded, and every `ingest_state` row is `ok`. |
+| 1 Concurrency | done | Locked `FastEmbedder._cache_query` and `_load`; added `KnowledgeStore.prewarm`. No SQLite changes: `_connect` already returns a fresh per-call connection. |
+| 2 Scope | done | `NO_PROCESS_CWD` sentinel plus leaf-name matching reported as `client_root_leaf`. Local STDIO behaviour unchanged; the canary suite still asserts `client_root`. |
+| 3 Reconcile guard | done | `_jsonl_files` names the missing roots and fails the scan. A contrast test proves this was not guarding a no-op: with a root present but emptied, a 1-in-5 loss reconciles through silently. |
+| 4 HTTP hub | done | `http_server.py`, schema v6 `access_audit`, scoped bearer tokens, DNS-rebinding protection, loopback-only bind, refusal to start inside `projects_root`. Verified end to end against the live 4,310-document corpus. |
+| 5 Spokes | **blocked** | Tailscale 1.102.3 installed and signed in; this node is `matrix.taila13ed8.ts.net`, MagicDNS on. `tailscale serve` is **not enabled for the tailnet** and must be enabled from the Tailscale admin console before the hub can be published. No second machine is online to register yet. |
+| 6 Per-host ingest | done | Remote roots keyed `session:{host}:{id}`; this machine stays unqualified so nothing is re-keyed. Hermes stays local-only. |
+| 7 Documentation | done | `CLAUDE.md` invariant rewritten and bounded; `SECURITY.md` network-exposure section; `README.md` remote-access and multi-machine ingestion sections. |
+| 8 REST surface | not started | Optional. Only needed if a CI agent cannot speak MCP. |
+| 9 Offline fallback | not started | Optional, deliberately deferred. |
+
+### To finish Phase 5
+
+1. Enable Serve for the tailnet in the Tailscale admin console.
+2. Start the hub, then publish it:
+
+```
+.venv/Scripts/python.exe http_server.py --allowed-host matrix.taila13ed8.ts.net
+tailscale serve --bg --https=443 http://127.0.0.1:8791
+```
+
+3. Tokens already exist in the ignored `.env` as `CEREBRAS_MEMORY_HTTP_TOKENS`:
+   client `spoke` with scope `rw`, client `ci` with scope `ro`.
+4. Register the spoke against `https://matrix.taila13ed8.ts.net/mcp` with an
+   `Authorization: Bearer` header, using `scripts/Register-CerebrasMemory.ps1`
+   extended with a `-Remote` mode (not yet written).
+5. Restore the `CerebrasMemoryRefresh` scheduled task, which is still missing.
+
+### Deviations from the plan as approved
+
+- Pre-existing work was committed to `kb-upgrade-phases-0-4`, not to `main`, and
+  `feat/remote-access` branches from it. Committing to `main` would have merged
+  2,665 lines of unreviewed work into the trunk as a side effect of this project,
+  and phases 1-3 modify files that work rewrites.
+- `config.example.json` was left alone. Adding a sample synced root would point a
+  fresh copy at a path that does not exist, which the new guard correctly treats
+  as a failed scan.
+- Three defects were found and fixed that the plan did not anticipate: `prewarm`
+  downloaded the reranker at startup, `CEREBRAS_MEMORY_NO_SECRETS` withheld the
+  hub's own bearer tokens, and the access audit recorded successes only.
+
+---
+
 ## Branch and merge workflow
 
 All work happens on a feature branch; `main` is only touched by the merge at the end.
