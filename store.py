@@ -142,6 +142,31 @@ def _query_tokens(query: str) -> list[str]:
     return list(dict.fromkeys(_WORD_RE.findall(query.casefold())))
 _UTC = timezone.utc
 _SCHEMA_INITIALIZATION_LOCK = threading.Lock()
+
+# How far above a client root to look for a project name. Deep enough for a root
+# nested a couple of levels inside a project, shallow enough that a client
+# sending a home directory or a drive root cannot reach an unrelated project far
+# up the tree.
+_LEAF_MATCH_MAX_DEPTH = 3
+
+
+class _NoProcessCwd:
+    """Sentinel for a caller that genuinely has no working directory.
+
+    ``cwd=None`` means "not supplied, fall back to this process". A request
+    arriving over the network is different: it has no working directory at all,
+    and inheriting the server's would scope a remote agent's search to whatever
+    project the hub happens to be running inside while reporting it as
+    ``process_cwd``. Such callers pass this instead.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "NO_PROCESS_CWD"
+
+
+NO_PROCESS_CWD = _NoProcessCwd()
 _DEFAULT_REFRESH_LEASE_SECONDS = 30 * 60
 
 
@@ -2132,16 +2157,57 @@ class KnowledgeStore:
             ).fetchall()
         return {str(row["project"]).casefold(): str(row["project"]) for row in rows}
 
-    def _project_for_path(self, value: str | Path, known: dict[str, str]) -> str | None:
+    def _project_for_path(
+        self,
+        value: str | Path,
+        known: dict[str, str],
+        *,
+        allow_leaf: bool = False,
+    ) -> tuple[str | None, str | None]:
+        """Resolve a filesystem path to a known project.
+
+        Returns ``(project, how)`` where ``how`` is ``"containment"`` when the
+        path sits under ``projects_root`` and ``"leaf"`` when it matched by
+        directory name instead.
+
+        Containment is exact but machine-local: a path from another machine can
+        never sit under this machine's ``projects_root``, so every remote client
+        root would resolve to nothing. Name matching is the cross-machine
+        fallback, and it is the rule ingestion already uses --
+        ``importers.agent_history._project_from_cwd`` records each transcript's
+        project as ``Path(cwd).name``, so stored project names are basenames by
+        construction.
+
+        ``allow_leaf`` is opt-in because it must not apply to the process
+        working directory. Widening that path would let a server newly scope
+        searches by whatever directory it happens to be started in.
+        """
+
         try:
             candidate = Path(value).resolve()
-            root = self.settings.projects_root.resolve()
-            relative = candidate.relative_to(root)
         except (OSError, ValueError):
-            return None
-        if not relative.parts:
-            return None
-        return known.get(relative.parts[0].casefold())
+            return None, None
+
+        try:
+            relative = candidate.relative_to(self.settings.projects_root.resolve())
+        except (OSError, ValueError):
+            relative = None
+        if relative is not None and relative.parts:
+            project = known.get(relative.parts[0].casefold())
+            if project is not None:
+                return project, "containment"
+
+        if not allow_leaf:
+            return None, None
+        # Deepest match first: the directory the client actually opened is a
+        # better answer than one of its ancestors.
+        for depth, part in enumerate((candidate, *candidate.parents)):
+            if depth >= _LEAF_MATCH_MAX_DEPTH:
+                break
+            project = known.get(part.name.casefold())
+            if project is not None:
+                return project, "leaf"
+        return None, None
 
     def resolve_project_scope(
         self,
@@ -2149,7 +2215,7 @@ class KnowledgeStore:
         project: str | None,
         global_search: bool,
         roots: Sequence[str | Path] | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | _NoProcessCwd | None = None,
     ) -> dict[str, Any]:
         if project and global_search:
             raise ValueError("project cannot be combined with global_search=true")
@@ -2163,17 +2229,27 @@ class KnowledgeStore:
         if global_search:
             return {"project": None, "origin": "global_explicit"}
 
-        root_projects = {
-            candidate
-            for value in roots or ()
-            if (candidate := self._project_for_path(value, known)) is not None
-        }
+        root_matches: list[tuple[str, str]] = []
+        for value in roots or ():
+            project, how = self._project_for_path(value, known, allow_leaf=True)
+            if project is not None:
+                root_matches.append((project, str(how)))
+        root_projects = {project for project, _ in root_matches}
         if len(root_projects) == 1:
-            return {"project": next(iter(root_projects)), "origin": "client_root"}
+            # Any containment match is the stronger signal, so a mixed set still
+            # reports client_root. The scope field stays honest about how the
+            # project was inferred either way.
+            leafed = all(how == "leaf" for _, how in root_matches)
+            return {
+                "project": next(iter(root_projects)),
+                "origin": "client_root_leaf" if leafed else "client_root",
+            }
         if len(root_projects) > 1:
             return {"project": None, "origin": "global_ambiguous_roots"}
 
-        inferred = self._project_for_path(cwd or Path.cwd(), known)
+        if cwd is NO_PROCESS_CWD:
+            return {"project": None, "origin": "global"}
+        inferred, _ = self._project_for_path(cwd or Path.cwd(), known)
         if inferred:
             return {"project": inferred, "origin": "process_cwd"}
         return {"project": None, "origin": "global"}
@@ -4477,7 +4553,7 @@ class KnowledgeStore:
         global_search: bool = False,
         rerank: bool | None = None,
         roots: Sequence[str | Path] | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | _NoProcessCwd | None = None,
         include_distillations: bool | None = None,
     ) -> dict[str, Any]:
         safe_query = redact_text(query).strip()
@@ -4876,7 +4952,7 @@ class KnowledgeStore:
         global_search: bool = False,
         rerank: bool | None = None,
         roots: Sequence[str | Path] | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | _NoProcessCwd | None = None,
         include_distillations: bool | None = None,
     ) -> list[dict[str, Any]]:
         return self.search_response(
