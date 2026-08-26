@@ -250,3 +250,53 @@ def test_a_batched_write_call_is_still_detected():
     ).encode("utf-8")
 
     assert tool_from_jsonrpc(body) == "kb_save_memory"
+
+
+def test_a_serving_process_loads_its_own_tokens_but_not_provider_keys(tmp_path, monkeypatch):
+    """The hub must be startable from the configuration the README documents.
+
+    CEREBRAS_MEMORY_NO_SECRETS exists so a network-reachable process cannot make
+    an outbound API call. It must not also withhold the inbound bearer tokens,
+    or the documented .env setup would leave the hub unable to start.
+    """
+
+    import config
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        chr(10).join(
+            [
+                "DEEPSEEK_API_KEY=should-not-load",
+                "NVIDIA_API_KEY=should-not-load",
+                f"CEREBRAS_MEMORY_HTTP_TOKENS=laptop:rw:{WRITER_SECRET}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    for name in ("DEEPSEEK_API_KEY", "NVIDIA_API_KEY", "CEREBRAS_MEMORY_HTTP_TOKENS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CEREBRAS_MEMORY_NO_SECRETS", "1")
+
+    config._load_secret_env(env_file)
+
+    import os
+
+    assert os.environ.get("CEREBRAS_MEMORY_HTTP_TOKENS") is not None
+    assert os.environ.get("DEEPSEEK_API_KEY") is None
+    assert os.environ.get("NVIDIA_API_KEY") is None
+    assert list(load_client_tokens().values())[0].label == "laptop"
+
+
+def test_an_ordinary_process_still_loads_provider_keys(tmp_path, monkeypatch):
+    import config
+    import os
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=loaded-normally", encoding="utf-8")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("CEREBRAS_MEMORY_NO_SECRETS", raising=False)
+
+    config._load_secret_env(env_file)
+
+    assert os.environ.get("DEEPSEEK_API_KEY") == "loaded-normally"

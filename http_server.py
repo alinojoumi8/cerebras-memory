@@ -426,15 +426,17 @@ def main(argv: list[str] | None = None) -> int:
             "and publish it with tailscale serve"
         )
 
+    # Settings first: loading them is also what reads CEREBRAS_MEMORY_HTTP_TOKENS
+    # out of .env. The provider API keys stay withheld either way.
+    settings = load_settings()
+    guard_working_directory(settings.projects_root)
+
     tokens = load_client_tokens()
     if not tokens:
         parser.error(
-            "no client tokens configured; set CEREBRAS_MEMORY_HTTP_TOKENS to one or more "
-            "label:scope:secret entries before starting the hub"
+            "no client tokens configured; set CEREBRAS_MEMORY_HTTP_TOKENS in .env or the "
+            "environment to one or more label:scope:secret entries before starting the hub"
         )
-
-    settings = load_settings()
-    guard_working_directory(settings.projects_root)
 
     hosts = list(args.allowed_hosts)
     if not hosts:

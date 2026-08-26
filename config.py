@@ -20,6 +20,9 @@ DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
 _ALLOWED_SECRET_ENV_KEYS = frozenset(
     {"DEEPSEEK_API_KEY", "NVIDIA_API_KEY", "CEREBRAS_MEMORY_HTTP_TOKENS"}
 )
+# Credentials for making outbound calls, as distinct from the credentials used
+# to authenticate inbound ones. Only these are withheld from a serving process.
+_PROVIDER_SECRET_ENV_KEYS = frozenset({"DEEPSEEK_API_KEY", "NVIDIA_API_KEY"})
 
 
 @dataclass(frozen=True)
@@ -173,15 +176,18 @@ def _deep_update(target: dict[str, Any], override: dict[str, Any]) -> dict[str, 
 def _load_secret_env(path: Path = DEFAULT_ENV_PATH) -> None:
     """Load only explicitly allowed API keys without overriding the process env.
 
-    ``CEREBRAS_MEMORY_NO_SECRETS`` skips the file entirely. The network listener
-    sets it: distillation runs from ``ingest.py`` and ``kb.py``, never from a
-    serving path, so the one process reachable from other machines has no reason
-    to hold an outbound API credential. Withholding it means a compromised
-    listener cannot make an outbound call at all.
+    ``CEREBRAS_MEMORY_NO_SECRETS`` withholds the *provider* keys. The network
+    listener sets it: distillation runs from ``ingest.py`` and ``kb.py``, never
+    from a serving path, so the one process reachable from other machines has no
+    reason to hold an outbound API credential, and a compromised listener cannot
+    make an outbound call at all. It still loads the bearer tokens it needs to
+    authenticate inbound requests -- withholding those would leave the hub unable
+    to start from its own documented configuration.
     """
 
+    allowed = _ALLOWED_SECRET_ENV_KEYS
     if os.environ.get("CEREBRAS_MEMORY_NO_SECRETS") == "1":
-        return
+        allowed = allowed - _PROVIDER_SECRET_ENV_KEYS
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -190,7 +196,7 @@ def _load_secret_env(path: Path = DEFAULT_ENV_PATH) -> None:
             continue
         key, separator, value = line.partition("=")
         key = key.strip()
-        if not separator or key not in _ALLOWED_SECRET_ENV_KEYS:
+        if not separator or key not in allowed:
             continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
