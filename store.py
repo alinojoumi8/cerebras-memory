@@ -2585,6 +2585,68 @@ class KnowledgeStore:
             raise RerankerUnavailable("reranker_disabled")
         return warm()
 
+    def record_access(
+        self,
+        *,
+        client_label: str,
+        token_fingerprint: str,
+        transport: str,
+        tool: str,
+        status: str,
+        query_hash: str | None = None,
+        result_count: int | None = None,
+        applied_project: str | None = None,
+        scope_origin: str | None = None,
+        latency_ms: float | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        """Record one network access, content-free.
+
+        Deliberately stores no query text and no snippets: a search audit that
+        kept the query would be a second, unredacted copy of everything anyone
+        ever looked for, which is a worse disclosure than the thing it audits.
+        ``query_hash`` keeps repeated searches correlatable without that.
+
+        Best effort by construction. An audit failure must never turn a working
+        search into an error for the caller, so the write is swallowed; the
+        alternative is a database hiccup taking the hub down.
+        """
+
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO access_audit(
+                        client_label, token_fingerprint, transport, tool, query_hash,
+                        result_count, applied_project, scope_origin, latency_ms,
+                        status, error_code, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        redact_text(client_label)[:120],
+                        str(token_fingerprint)[:64],
+                        str(transport)[:32],
+                        str(tool)[:120],
+                        query_hash,
+                        result_count,
+                        redact_text(applied_project)[:200] if applied_project else None,
+                        scope_origin,
+                        latency_ms,
+                        str(status)[:32],
+                        str(error_code)[:200] if error_code else None,
+                        _iso(None),
+                    ),
+                )
+        except Exception:  # noqa: BLE001 - auditing must not break serving
+            pass
+
+    @staticmethod
+    def access_query_hash(query: str) -> str:
+        """Stable, non-reversible handle for a query string."""
+
+        return hashlib.sha256(query.strip().casefold().encode("utf-8")).hexdigest()[:32]
+
     def prewarm(self) -> dict[str, Any]:
         """Pay the cold-start cost up front instead of inside a request.
 
@@ -2629,6 +2691,17 @@ class KnowledgeStore:
 
         if not self.settings.reranker.enabled:
             status["reranker"] = {"ok": True, "enabled": False}
+            return status
+
+        # Warming must never download. Server startup has to be bounded and work
+        # offline, and a first fetch of the cross-encoder is neither -- it turns
+        # "the hub is starting" into an open-ended network operation. An uncached
+        # reranker is reported rather than fetched: rerank() already degrades
+        # through RerankerUnavailable, and scripts/warm_models.py stays the
+        # explicit, deliberate way to pull the model down.
+        is_cached = getattr(self.reranker, "is_cached", None)
+        if is_cached is not None and not is_cached():
+            status["reranker"] = {"ok": True, "enabled": True, "cached": False}
             return status
 
         started = time.perf_counter()
