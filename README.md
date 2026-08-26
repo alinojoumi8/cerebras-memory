@@ -13,6 +13,11 @@ sent to the configured DeepSeek endpoint; project documents, saved memories,
 raw credentials, and reasoning/tool records are never sent. The service does
 not replace or modify the existing Codex AgentMemory server.
 
+> **In progress:** multi-machine and multi-agent access (hub-and-spoke over
+> Tailscale) is planned in [docs/REMOTE-ACCESS-PLAN.md](docs/REMOTE-ACCESS-PLAN.md).
+> That plan deliberately relaxes the STDIO-only invariant in `CLAUDE.md`; read it
+> before adding any network surface.
+
 ## Runtime
 
 - Python 3.11 in `.venv`
