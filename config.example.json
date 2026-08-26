@@ -3,7 +3,7 @@
   "model_cache_dir": "data/models",
   "embedding_model": "BAAI/bge-small-en-v1.5",
   "embedding_dimensions": 384,
-  "projects_root": "C:\\Users\\matri\\Documents\\myprojects",
+  "projects_root": "%USERPROFILE%\\Documents\\myprojects",
   "transcript_days": 90,
   "chunk_size": 1800,
   "chunk_overlap": 200,
@@ -18,7 +18,9 @@
     "projects": true
   },
   "agent_roots": {
-    "claude": ["%USERPROFILE%\\.claude\\projects"],
+    "claude": [
+      "%USERPROFILE%\\.claude\\projects"
+    ],
     "codex": [
       "%USERPROFILE%\\.codex\\sessions",
       "%USERPROFILE%\\.codex\\archived_sessions"
@@ -66,7 +68,12 @@
     "pilot_per_source": 10,
     "remote_policy": {
       "enabled": true,
-      "allow_sources": ["hermes", "claude", "codex", "grok"],
+      "allow_sources": [
+        "hermes",
+        "claude",
+        "codex",
+        "grok"
+      ],
       "allow_projects": [],
       "deny_projects": [],
       "sensitive_project_terms": [

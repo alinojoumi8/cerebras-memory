@@ -36,7 +36,7 @@ def _doc(
 
 
 def test_schema_version_wal_foreign_keys_and_transactional_replacement(store):
-    assert store.schema_version() == 3
+    assert store.schema_version() == 5
     first = store.upsert_document(_doc("one", "alpha " * 300))
     before = store.get_document(first.document_id, limit=50)
     assert before and before["pagination"]["total_chunks"] > 1
@@ -51,8 +51,8 @@ def test_schema_version_wal_foreign_keys_and_transactional_replacement(store):
 
     with sqlite3.connect(store.database_path) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].casefold() == "wal"
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 5
         assert connection.execute(
             """
             SELECT COUNT(*) FROM provenance_receipts
@@ -61,6 +61,84 @@ def test_schema_version_wal_foreign_keys_and_transactional_replacement(store):
             """,
             (second.document_id,),
         ).fetchone()[0] == 1
+
+
+def test_reverted_content_reactivates_its_provenance_receipt(store):
+    """Receipt ids are content-derived, so reverted content collides with its own
+    superseded row.
+
+    Ignoring that conflict leaves the artifact with zero active receipts: search
+    reports ``provenance: null`` and falls back to default taints, and the
+    backfill parity check can never be satisfied again -- re-running a full
+    corpus backfill on every store construction.
+    """
+
+    def active_receipts(document_id: str) -> int:
+        with sqlite3.connect(store.database_path) as connection:
+            return connection.execute(
+                """
+                SELECT COUNT(*) FROM provenance_receipts
+                WHERE artifact_type = 'document' AND artifact_id = ?
+                  AND superseded_at IS NULL
+                """,
+                (document_id,),
+            ).fetchone()[0]
+
+    original = store.upsert_document(_doc("revert", "first revision of the content"))
+    assert active_receipts(original.document_id) == 1
+
+    store.upsert_document(_doc("revert", "second revision of the content"))
+    assert active_receipts(original.document_id) == 1
+
+    # Back to the original content, and so back to the original receipt id.
+    reverted = store.upsert_document(_doc("revert", "first revision of the content"))
+    assert reverted.document_id == original.document_id
+    assert active_receipts(original.document_id) == 1
+
+    # The parity check that guards the expensive backfill must still hold.
+    with sqlite3.connect(store.database_path) as connection:
+        expected = sum(
+            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("documents", "chunks", "distillations")
+        )
+        present = connection.execute(
+            """
+            SELECT COUNT(*) FROM provenance_receipts
+            WHERE artifact_type IN ('document', 'chunk', 'distillation')
+              AND superseded_at IS NULL
+            """
+        ).fetchone()[0]
+    assert present >= expected
+
+    served = store.get_document(reverted.document_id, limit=5)
+    assert served["document"]["provenance"] is not None
+
+
+def test_legacy_repair_pass_does_not_run_against_a_current_database(store, settings_factory):
+    """The v2 repair scans every distillation row; MCP builds a store per client."""
+
+    statements: list[str] = []
+    original_connect = KnowledgeStore._connect
+
+    def tracing_connect(self):
+        connection = original_connect(self)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    store.upsert_document(_doc("repair", "content for the repair check"))
+
+    KnowledgeStore._connect = tracing_connect
+    try:
+        KnowledgeStore(store.settings, HashingEmbedder(32))
+    finally:
+        KnowledgeStore._connect = original_connect
+
+    repair_scans = [
+        statement
+        for statement in statements
+        if "INSERT OR IGNORE INTO distillation_unit_state" in statement
+    ]
+    assert repair_scans == [], "the legacy repair re-ran against an up-to-date schema"
 
 
 def test_hybrid_search_filters_citations_and_recency(store):
@@ -132,7 +210,7 @@ def test_v1_to_v3_migration_preserves_documents_chunks_and_citations(settings_fa
 
     migrated = KnowledgeStore(settings, HashingEmbedder(32))
     after = migrated.get_document(written.document_id)
-    assert migrated.schema_version() == 3
+    assert migrated.schema_version() == 5
     assert after is not None
     assert after["document"]["document_id"] == before["document"]["document_id"]
     assert [chunk["chunk_id"] for chunk in after["chunks"]] == [

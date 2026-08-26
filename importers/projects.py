@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
 import stat
 
 from config import Settings
@@ -41,6 +42,10 @@ _EXCLUDED_DIRECTORIES = {
     "logs",
     "log",
     "graphify-out",
+    # Simulator run artifacts. A single worldsimulator study wrote ~9,000
+    # per-agent copies of the same skill library under .runtime, which grew
+    # the corpus 2.8x and made 68% of all documents near-duplicate noise.
+    ".runtime",
     ".next",
     ".nuxt",
     ".turbo",
@@ -66,11 +71,42 @@ _SECRET_NAME_PARTS = {
     "auth.json",
 }
 
+# Whole filename words that mark a credential store. "service-account.md" splits
+# into {"service", "account"}, so both halves are listed.
+_SECRET_WORDS = {
+    "credential",
+    "credentials",
+    "secret",
+    "secrets",
+    "passwd",
+    "pwd",
+    "id_rsa",
+    "id_ed25519",
+    "rsa",
+    "ed25519",
+}
+
 
 def _looks_secret(path: Path) -> bool:
+    """Whether a filename looks like a credential store rather than a document.
+
+    Matching is on whole name components, not bare substrings. ``part in name``
+    excluded ordinary documentation with no warning: ``tokenizer-notes.md``,
+    ``secrets-management.md``, ``password-policy.md`` and anything containing
+    ``.env`` were all silently dropped, counted only as ``skipped``.
+    """
+
     name = path.name.casefold()
     stem = path.stem.casefold()
-    return any(part == name or part == stem or part in name for part in _SECRET_NAME_PARTS)
+    if name in _SECRET_NAME_PARTS or stem in _SECRET_NAME_PARTS:
+        return True
+    # Split on the separators that delimit words in filenames, so
+    # "service-account.md" still matches while "tokenizer-notes.md" does not.
+    components = {piece for piece in re.split(r"[._\-\s]+", stem) if piece}
+    if components & _SECRET_WORDS:
+        return True
+    # Dotfile-style credential stores such as ".env" or ".env.local".
+    return name.startswith(".env")
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -125,20 +161,34 @@ def scan_projects(settings: Settings, _cutoff: datetime | None = None) -> ScanRe
                 if path.suffix.casefold() not in _ALLOWED_EXTENSIONS:
                     result.skipped += 1
                     continue
+                relative = path.relative_to(root)
+                source_key = relative.as_posix().casefold()
                 if _looks_secret(path) or _is_reparse_point(path):
                     result.skipped += 1
                     continue
-                text = _safe_read(path, settings.max_file_bytes)
-                if text is None or not text.strip():
+                try:
+                    text = _safe_read(path, settings.max_file_bytes)
+                except OSError:
+                    # One locked or permission-denied file used to fail the whole
+                    # scan, leaving every project document unrefreshed. Skip the
+                    # file, retain its key so nothing is deleted, and carry on.
                     result.skipped += 1
+                    result.retained_keys.add(source_key)
                     continue
-                relative = path.relative_to(root)
+                if text is None or not text.strip():
+                    # The file still exists; it just grew past max_file_bytes, is
+                    # no longer valid UTF-8, or gained a NUL byte. Deleting an
+                    # already-indexed document for that would discard the last
+                    # good version in favour of nothing.
+                    result.skipped += 1
+                    result.retained_keys.add(source_key)
+                    continue
                 project = relative.parts[0] if len(relative.parts) > 1 else root.name
                 timestamp = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
                 documents.append(
                     IngestDocument(
                         source="projects",
-                        source_key=relative.as_posix().casefold(),
+                        source_key=source_key,
                         title=relative.as_posix(),
                         text=text,
                         timestamp=timestamp,

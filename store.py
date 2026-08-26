@@ -18,13 +18,13 @@ import sqlite3
 import statistics
 import threading
 import time
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 import uuid
 from urllib.parse import urlparse
 
 import numpy as np
 
-from chunking import chunk_text
+from chunking import Chunk, chunk_document, chunk_text
 from config import Settings, load_settings
 from distillation import (
     AGENT_SOURCES,
@@ -46,7 +46,100 @@ from runlock import distillation_lock
 from vector_index import UsearchVectorIndex, VectorIndexUnavailable
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
+
+class ReconcileFloorNotMet(RuntimeError):
+    """A scan returned implausibly few keys, so deletion was refused."""
+
+
+# Below this many indexed documents a source is too small for the ratio floor to
+# distinguish a broken scan from ordinary cleanup. Every real source in a working
+# deployment sits far above it.
+_RECONCILE_FLOOR_MIN_DOCUMENTS = 10
+
+
+_WORD_RE = re.compile(r"[\w'-]+", re.UNICODE)
+
+# Content-free tokens. These carry almost no retrieval signal but dominate a
+# naive query tokenization: they appear in nearly every chunk, so letting them
+# anchor a snippet window or consume the lexical candidate budget crowds out the
+# rare terms that actually discriminate.
+_STOPWORDS = frozenset(
+    """
+    a about after all also am an and any are as at be because been before being
+    but by can cannot could did do does doing done down during each few for from
+    further had has have having he her here hers him his how i if in into is it
+    its just me more most my no nor not of off on once only or other our out over
+    own same she should so some such than that the their them then there these
+    they this those through to too under until up very was we were what when
+    where which while who whom why will with would you your
+    """.split()
+)
+
+
+# Total characters of passage text handed to the cross-encoder per variant,
+# split across that variant's chunks. Sized against the reranker's 512-token
+# ceiling at roughly four characters per token, leaving room for the query.
+_RERANK_PASSAGE_BUDGET = 700
+
+# Maximum distinct terms in a single FTS5 MATCH expression.
+_MAX_FTS_TERMS = 24
+
+# Bind-parameter window for IN (...) lookups, well under SQLite's limit.
+_SQL_PARAM_BATCH = 500
+
+# Bump whenever chunk boundaries or the embedded text change. Documents whose
+# chunks carry a different version are re-chunked on an ordinary incremental
+# refresh, so a chunking change no longer requires a full rebuild.
+CHUNKER_VERSION = "heading-breadcrumb-v1"
+
+# A refresh heartbeats every 60 s. Five missed beats means the owner is gone, so
+# its lease can be reclaimed without waiting out the full expiry.
+_LEASE_HEARTBEAT_GRACE_SECONDS = 300
+
+# Sentinel model name the deterministic test embedder is bound to.
+_TEST_EMBEDDING_MODEL = "test/hash-v1"
+
+
+# Extensions whose structure is worth chunking on rather than through.
+_MARKDOWN_SUFFIXES = frozenset({".md", ".mdx", ".markdown"})
+
+
+def _is_markdown(item: Any) -> bool:
+    """Whether a prepared document should use the heading-aware chunker.
+
+    Only project documents qualify. Agent transcripts are stored as
+    ``USER [ts] / ASSISTANT [ts]`` blocks whose ``#`` lines are dialogue content,
+    not structure, and re-chunking them on headings would break the ordinal
+    ranges that distillation maps evidence back through.
+    """
+
+    if getattr(item, "source", "") != "projects":
+        return False
+    extension = ""
+    try:
+        metadata = json.loads(getattr(item, "metadata_json", "") or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    if isinstance(metadata, Mapping):
+        extension = str(metadata.get("extension") or "").casefold()
+    if not extension:
+        extension = Path(str(getattr(item, "title", ""))).suffix.casefold()
+    return extension in _MARKDOWN_SUFFIXES
+
+
+def _embedding_text(item: Any, chunk: Chunk) -> str:
+    """Text handed to the embedder: breadcrumb first, then the chunk body."""
+
+    if not chunk.breadcrumb:
+        return chunk.text
+    return f"{getattr(item, 'title', '')} › {chunk.breadcrumb}\n\n{chunk.text}"
+
+
+def _query_tokens(query: str) -> list[str]:
+    """Ordered, unique, case-folded word tokens for a query."""
+
+    return list(dict.fromkeys(_WORD_RE.findall(query.casefold())))
 _UTC = timezone.utc
 _SCHEMA_INITIALIZATION_LOCK = threading.Lock()
 _DEFAULT_REFRESH_LEASE_SECONDS = 30 * 60
@@ -81,7 +174,7 @@ class _PreparedDocument:
     document_id: str
     existing: bool = False
     unchanged: bool = False
-    pieces: list[str] = field(default_factory=list)
+    pieces: list[Chunk] = field(default_factory=list)
     vectors: list[np.ndarray] = field(default_factory=list)
     chunk_count: int = 0
 
@@ -93,7 +186,6 @@ class _ExactVectorSnapshot:
     dimensions: int
     keys: np.ndarray
     vectors: np.ndarray
-    positions: dict[int, int]
     sources: np.ndarray
     projects: np.ndarray
     timestamps: np.ndarray
@@ -131,6 +223,12 @@ def parse_timestamp(value: str | datetime | None) -> datetime:
         try:
             parsed = datetime.fromisoformat(text)
         except ValueError:
+            # Deliberate: an unparseable timestamp sorts as maximally old rather
+            # than failing ingestion or search.  Note the ranking consequence --
+            # the recency factor in search turns epoch 0 into a permanent x0.7
+            # multiplier, so a source that systematically emits bad timestamps
+            # is quietly penalised rather than rejected.  Importers are expected
+            # to normalise before reaching here.
             return datetime.fromtimestamp(0, _UTC)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_UTC)
@@ -205,18 +303,38 @@ class KnowledgeStore:
         *,
         reranker: Reranker | None = None,
         distiller: Distiller | None = None,
+        ingest_mode: bool = False,
     ):
+        # ingest_mode selects the batch thread budget instead of the serving cap.
         self.settings = settings or load_settings()
         self.settings.ensure_runtime_directories()
         self.database_path = Path(self.settings.database_path)
         if embedder is None:
             if os.environ.get("CEREBRAS_MEMORY_TEST_EMBEDDER") == "1":
+                # This hook swaps semantic embeddings for a bag-of-words hash and
+                # disables the reranker. Retrieval quality collapses silently, so
+                # require the configuration to opt in as well: an ambient
+                # environment variable alone must not be able to downgrade a real
+                # deployment, and MCP clients control the server's environment.
+                if self.settings.embedding_model != _TEST_EMBEDDING_MODEL:
+                    raise RuntimeError(
+                        "CEREBRAS_MEMORY_TEST_EMBEDDER=1 requires "
+                        f'embedding_model="{_TEST_EMBEDDING_MODEL}", but this '
+                        f'configuration uses "{self.settings.embedding_model}". '
+                        "Refusing to silently downgrade retrieval quality."
+                    )
                 embedder = HashingEmbedder(dimensions=self.settings.embedding_dimensions)
             else:
                 embedder = FastEmbedder(
                     self.settings.embedding_model,
                     self.settings.embedding_dimensions,
                     self.settings.model_cache_dir,
+                    query_prefix=self.settings.embedding_query_prefix,
+                    threads=(
+                        self.settings.ingest_embedding_threads
+                        if ingest_mode
+                        else self.settings.embedding_threads
+                    ),
                 )
         self.embedder = embedder
         if reranker is None:
@@ -263,6 +381,10 @@ class KnowledgeStore:
                     raise RuntimeError(
                         f"Database schema {current} is newer than supported schema {SCHEMA_VERSION}"
                     )
+                # The version this process found on disk, before any migration
+                # below advances it.  Used to decide whether the legacy repair
+                # pass still has anything to do.
+                opened_version = current
                 if current < 1:
                     connection.executescript(
                     """
@@ -302,6 +424,8 @@ class KnowledgeStore:
                         embedding BLOB NOT NULL,
                         embedding_model TEXT NOT NULL,
                         embedding_dimensions INTEGER NOT NULL,
+                        embedding_input_hash TEXT,
+                        chunker_version TEXT,
                         created_at TEXT NOT NULL,
                         UNIQUE(document_id, ordinal)
                     );
@@ -421,7 +545,9 @@ class KnowledgeStore:
                         end_ordinal INTEGER NOT NULL,
                         distiller_model TEXT NOT NULL,
                         prompt_version TEXT NOT NULL,
-                        status TEXT NOT NULL CHECK(status IN ('pending', 'ready', 'failed')),
+                        status TEXT NOT NULL CHECK(
+                            status IN ('pending', 'ready', 'failed', 'policy_blocked')
+                        ),
                         attempts INTEGER NOT NULL DEFAULT 0,
                         last_attempt_at TEXT,
                         last_success_at TEXT,
@@ -619,12 +745,135 @@ class KnowledgeStore:
                     COMMIT;
                     """
                     )
+                    # Keep the tracking variable in step with user_version, as
+                    # v1 and v2 do.  Nothing below reads it today, so the
+                    # omission was harmless -- but a v2 database would reach the
+                    # next migration added here still claiming to be v2.
+                    current = 3
+                if current < 4:
+                    # Units belonging to a policy-blocked document were recorded
+                    # as 'pending', which reads as retryable work. The
+                    # blocked-decision cache means they are never retried, so the
+                    # pipeline could not converge and stats reported outstanding
+                    # work that would never finish. Add a terminal status and
+                    # reclassify the existing rows. SQLite cannot alter a CHECK
+                    # constraint, so the table is rebuilt in place.
+                    connection.executescript(
+                        """
+                    BEGIN IMMEDIATE;
+                    CREATE TABLE distillation_unit_state_v4 (
+                        unit_state_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                        input_hash TEXT NOT NULL,
+                        unit_ordinal INTEGER NOT NULL,
+                        start_ordinal INTEGER NOT NULL,
+                        end_ordinal INTEGER NOT NULL,
+                        distiller_model TEXT NOT NULL,
+                        prompt_version TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK(
+                            status IN ('pending', 'ready', 'failed', 'policy_blocked')
+                        ),
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        last_attempt_at TEXT,
+                        last_success_at TEXT,
+                        last_error TEXT,
+                        UNIQUE(document_id, input_hash, distiller_model, prompt_version)
+                    );
+                    INSERT INTO distillation_unit_state_v4(
+                        unit_state_pk, document_id, input_hash, unit_ordinal,
+                        start_ordinal, end_ordinal, distiller_model, prompt_version,
+                        status, attempts, last_attempt_at, last_success_at, last_error
+                    )
+                    SELECT
+                        u.unit_state_pk, u.document_id, u.input_hash, u.unit_ordinal,
+                        u.start_ordinal, u.end_ordinal, u.distiller_model, u.prompt_version,
+                        CASE
+                            WHEN u.status = 'pending' AND s.status = 'blocked'
+                                THEN 'policy_blocked'
+                            ELSE u.status
+                        END,
+                        u.attempts, u.last_attempt_at, u.last_success_at, u.last_error
+                    FROM distillation_unit_state u
+                    LEFT JOIN distillation_state s ON s.document_id = u.document_id;
+
+                    DROP TABLE distillation_unit_state;
+                    ALTER TABLE distillation_unit_state_v4
+                        RENAME TO distillation_unit_state;
+                    CREATE INDEX IF NOT EXISTS idx_distillation_unit_state_status
+                        ON distillation_unit_state(status, document_id);
+
+                    INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+                    PRAGMA user_version = 4;
+                    COMMIT;
+                    """
+                    )
+                if current < 5:
+                    # Two columns that make re-indexing cheap.
+                    #
+                    # embedding_input_hash lets a rebuild reuse an existing vector
+                    # instead of recomputing it. It hashes the *embedding input*,
+                    # not the chunk text, because _embedding_text prepends the
+                    # heading breadcrumb. The backfill below is exact rather than
+                    # approximate: no chunk written before this migration carried a
+                    # breadcrumb, and for those _embedding_text returns the bare
+                    # chunk text, so the input hash is precisely content_hash.
+                    #
+                    # chunker_version lets a chunking change invalidate only the
+                    # documents it affects, the same way an embedding-model change
+                    # already does, instead of forcing a full rebuild. Existing
+                    # rows stay NULL so they are re-chunked exactly once.
+                    # A freshly created database already has both columns from the
+                    # v1 table definition, so the ALTERs must be conditional -
+                    # SQLite has no ADD COLUMN IF NOT EXISTS.
+                    existing_columns = {
+                        str(row["name"])
+                        for row in connection.execute("PRAGMA table_info(chunks)")
+                    }
+                    connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        if "embedding_input_hash" not in existing_columns:
+                            connection.execute(
+                                "ALTER TABLE chunks ADD COLUMN embedding_input_hash TEXT"
+                            )
+                        if "chunker_version" not in existing_columns:
+                            connection.execute(
+                                "ALTER TABLE chunks ADD COLUMN chunker_version TEXT"
+                            )
+                        connection.execute(
+                            "UPDATE chunks SET embedding_input_hash = content_hash "
+                            "WHERE embedding_input_hash IS NULL"
+                        )
+                        connection.execute(
+                            """
+                            CREATE INDEX IF NOT EXISTS idx_chunks_embedding_input
+                            ON chunks(
+                                embedding_input_hash, embedding_model, embedding_dimensions
+                            )
+                            """
+                        )
+                        connection.execute(
+                            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) "
+                            "VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+                        )
+                        connection.execute("PRAGMA user_version = 5")
+                        connection.commit()
+                    except Exception:
+                        connection.rollback()
+                        raise
                 # Early v2 builds aggregated retry state at document level.
                 # This additive, idempotent repair gives existing v2 databases
                 # the required per-unit pending/failed state without changing
                 # the schema version or any raw document/chunk identity.
-                connection.executescript(
-                    """
+                #
+                # Only databases opened below the current schema can still need
+                # it: the v2 migration creates both tables outright, so for an
+                # up-to-date database this was a full scan of every distillation
+                # row against a UNIQUE index on every KnowledgeStore
+                # construction -- and MCP builds one store per client.
+                if opened_version < SCHEMA_VERSION:
+                    connection.executescript(
+                        """
                     CREATE TABLE IF NOT EXISTS distillation_unit_state (
                         unit_state_pk INTEGER PRIMARY KEY AUTOINCREMENT,
                         document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
@@ -634,7 +883,9 @@ class KnowledgeStore:
                         end_ordinal INTEGER NOT NULL,
                         distiller_model TEXT NOT NULL,
                         prompt_version TEXT NOT NULL,
-                        status TEXT NOT NULL CHECK(status IN ('pending', 'ready', 'failed')),
+                        status TEXT NOT NULL CHECK(
+                            status IN ('pending', 'ready', 'failed', 'policy_blocked')
+                        ),
                         attempts INTEGER NOT NULL DEFAULT 0,
                         last_attempt_at TEXT,
                         last_success_at TEXT,
@@ -660,7 +911,7 @@ class KnowledgeStore:
                            NULL, updated_at, NULL
                     FROM distillations;
                     """
-                )
+                    )
                 self._backfill_provenance(connection)
 
     @staticmethod
@@ -696,13 +947,31 @@ class KnowledgeStore:
             """,
             (now, artifact_type, artifact_id, receipt_id),
         )
+        # ON CONFLICT rather than INSERT OR IGNORE: the receipt id is derived
+        # from the content hash, so an artifact whose content returns to a value
+        # it previously held (a file edited then reverted, a transcript
+        # truncated back) collides with its own superseded row.  Ignoring the
+        # conflict would leave that artifact with *zero* active receipts --
+        # search would report provenance: null and fall back to default taints,
+        # and _backfill_provenance's parity check could never be satisfied
+        # again, re-running a full corpus backfill on every store construction.
+        # Reactivating the existing row is the correct reading: same artifact,
+        # same content, same producer, so the same receipt is valid once more.
+        # created_at is left alone -- the receipt's identity has not changed.
         connection.execute(
             """
-            INSERT OR IGNORE INTO provenance_receipts(
+            INSERT INTO provenance_receipts(
                 id, artifact_type, artifact_id, document_id, source, project,
                 content_hash, producer, producer_version, taints_json,
                 metadata_json, created_at, superseded_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(id) DO UPDATE SET
+                superseded_at = NULL,
+                document_id = excluded.document_id,
+                source = excluded.source,
+                project = excluded.project,
+                taints_json = excluded.taints_json,
+                metadata_json = excluded.metadata_json
             """,
             (
                 receipt_id,
@@ -888,15 +1157,70 @@ class KnowledgeStore:
         )
 
     def _document_needs_embedding(self, connection: sqlite3.Connection, document_id: str) -> bool:
+        """Whether a document's stored chunks are stale.
+
+        A chunker change counts as staleness just like an embedding-model change:
+        without this, altering how documents are split required a `--full`
+        rebuild of the entire corpus, because content hashes were unchanged and
+        every document therefore looked up to date.
+        """
+
         row = connection.execute(
             """
             SELECT COUNT(*) AS total,
-                   SUM(CASE WHEN embedding_model = ? AND embedding_dimensions = ? THEN 1 ELSE 0 END) AS current
+                   SUM(
+                       CASE WHEN embedding_model = ? AND embedding_dimensions = ?
+                                 AND chunker_version = ?
+                            THEN 1 ELSE 0 END
+                   ) AS current
             FROM chunks WHERE document_id = ?
             """,
-            (self.embedder.model_name, self.embedder.dimensions, document_id),
+            (
+                self.embedder.model_name,
+                self.embedder.dimensions,
+                CHUNKER_VERSION,
+                document_id,
+            ),
         ).fetchone()
         return int(row["total"] or 0) == 0 or int(row["current"] or 0) != int(row["total"] or 0)
+
+    def _reusable_embeddings(
+        self,
+        connection: sqlite3.Connection,
+        input_hashes: Sequence[str],
+    ) -> dict[str, np.ndarray]:
+        """Existing vectors for embedding inputs we have already encoded.
+
+        Re-encoding text that has not changed is the single largest avoidable
+        cost in a rebuild: a chunking change that only affects markdown still
+        recomputed every conversation chunk. Old rows are still present here
+        because embeddings are computed before ``BEGIN IMMEDIATE``, so a document
+        can reuse its own previous vectors, and identical text shared across
+        files is reused for free.
+        """
+
+        if not input_hashes:
+            return {}
+        found: dict[str, np.ndarray] = {}
+        unique = list(dict.fromkeys(input_hashes))
+        for start in range(0, len(unique), _SQL_PARAM_BATCH):
+            window = unique[start : start + _SQL_PARAM_BATCH]
+            placeholders = ",".join("?" for _ in window)
+            rows = connection.execute(
+                f"""
+                SELECT embedding_input_hash, embedding
+                FROM chunks
+                WHERE embedding_input_hash IN ({placeholders})
+                  AND embedding_model = ? AND embedding_dimensions = ?
+                GROUP BY embedding_input_hash
+                """,
+                (*window, self.embedder.model_name, self.embedder.dimensions),
+            ).fetchall()
+            for row in rows:
+                vector = np.frombuffer(row["embedding"], dtype=np.float32)
+                if vector.shape == (self.embedder.dimensions,):
+                    found[str(row["embedding_input_hash"])] = np.ascontiguousarray(vector)
+        return found
 
     def _prepare_document(self, document: IngestDocument) -> _PreparedDocument:
         safe_source = redact_text(document.source.strip().casefold())
@@ -935,15 +1259,46 @@ class KnowledgeStore:
         *,
         force: bool = False,
     ) -> list[WriteResult]:
-        """Redact, embed in bounded batches, and atomically replace documents.
+        """Redact, chunk, embed and atomically replace documents, in batches.
 
-        All embeddings are completed before the write transaction begins.  A
-        model failure therefore cannot leave a partially written source pass.
+        Work is committed every ``ingest_batch_documents`` documents rather than
+        once per source. A full rebuild previously held an entire source in
+        memory - 3.7 GB and ~100 minutes for `projects` - showed no progress the
+        whole time, and lost everything on a crash or on the scheduled task's
+        six-hour limit. Batching bounds the memory, makes progress observable,
+        and makes an interrupted rebuild resumable: each batch is durable, and
+        the next run re-derives only what is still stale.
+
+        Per-document atomicity is unchanged - a document is fully written or not
+        at all - and ingest.py still reconciles only after a completely
+        successful pass, so a partial pass can never trigger deletions.
         """
 
         prepared = [self._prepare_document(document) for document in documents]
         if not prepared:
             return []
+        self._classify_documents(prepared, force=force)
+
+        batch_size = max(1, self.settings.ingest_batch_documents)
+        results: list[WriteResult] = []
+        totals = {"total": 0, "reused": 0, "embedded": 0}
+        for start in range(0, len(prepared), batch_size):
+            batch = prepared[start : start + batch_size]
+            self._embed_prepared(batch)
+            for key in totals:
+                totals[key] += int(self.last_embedding_reuse.get(key, 0))
+            results.extend(self._write_prepared(batch))
+        self.last_embedding_reuse = totals
+        return results
+
+    def _classify_documents(
+        self,
+        prepared: Sequence[_PreparedDocument],
+        *,
+        force: bool,
+    ) -> None:
+        """Decide which documents are stale and chunk the ones that are."""
+
         with self._connect() as connection:
             for item in prepared:
                 existing = connection.execute(
@@ -965,26 +1320,67 @@ class KnowledgeStore:
                         ).fetchone()[0]
                     )
                 else:
-                    item.pieces = chunk_text(
+                    item.pieces = chunk_document(
                         item.text,
                         target_size=self.settings.chunk_size,
                         overlap=self.settings.chunk_overlap,
+                        markdown=_is_markdown(item),
                     )
 
-        locations: list[tuple[_PreparedDocument, str]] = [
+
+    def _embed_prepared(self, prepared: Sequence[_PreparedDocument]) -> None:
+        """Attach vectors to every stale document in this batch."""
+
+        locations: list[tuple[_PreparedDocument, Chunk]] = [
             (item, piece)
             for item in prepared
             if not item.unchanged
             for piece in item.pieces
         ]
         ingestion_embed = getattr(self.embedder, "embed_for_ingestion", self.embedder.embed)
-        vectors = ingestion_embed([piece for _, piece in locations])
+        # The breadcrumb is embedded with the chunk but never stored as its
+        # content: a fragment reading "we decided to keep the 30-second timeout"
+        # is otherwise encoded with no signal about which project, file or
+        # section it belongs to, and no amount of neighbour expansion at query
+        # time can put that back. Returned evidence stays the raw chunk, so
+        # citations and provenance are unaffected.
+        embedding_texts = [_embedding_text(item, piece) for item, piece in locations]
+        input_hashes = [
+            hashlib.sha256(text.encode("utf-8")).hexdigest() for text in embedding_texts
+        ]
+        with self._connect() as connection:
+            reusable = self._reusable_embeddings(connection, input_hashes)
+        pending_indexes = [
+            index for index, digest in enumerate(input_hashes) if digest not in reusable
+        ]
+        fresh = (
+            ingestion_embed([embedding_texts[index] for index in pending_indexes])
+            if pending_indexes
+            else []
+        )
+        vectors: list[np.ndarray] = [None] * len(locations)  # type: ignore[list-item]
+        for position, index in enumerate(pending_indexes):
+            vectors[index] = fresh[position]
+            # Later chunks in this same pass can reuse what we just computed.
+            reusable.setdefault(input_hashes[index], fresh[position])
+        for index, digest in enumerate(input_hashes):
+            if vectors[index] is None:
+                vectors[index] = reusable[digest]
+        self.last_embedding_reuse = {
+            "total": len(locations),
+            "reused": len(locations) - len(pending_indexes),
+            "embedded": len(pending_indexes),
+        }
         if len(vectors) != len(locations):
             raise RuntimeError("Embedding backend returned an unexpected vector count")
         for (item, _), vector in zip(locations, vectors, strict=True):
             if np.asarray(vector).shape != (self.embedder.dimensions,):
                 raise ValueError("Embedding backend returned an unexpected vector dimension")
             item.vectors.append(np.asarray(vector, dtype=np.float32))
+
+
+    def _write_prepared(self, prepared: Sequence[_PreparedDocument]) -> list[WriteResult]:
+        """Commit one batch of prepared documents."""
 
         now = _iso(None)
         with self._connect() as connection:
@@ -1095,28 +1491,41 @@ class KnowledgeStore:
                         (item.document_id,),
                     )
                     connection.execute("DELETE FROM chunks WHERE document_id = ?", (item.document_id,))
-                    for ordinal, (piece, vector) in enumerate(
+                    for ordinal, (chunk, vector) in enumerate(
                         zip(item.pieces, item.vectors, strict=True)
                     ):
+                        piece = chunk.text
+                        # ``title`` is FTS-indexed at weight 2.0, so the
+                        # breadcrumb becomes lexically searchable too.
+                        chunk_title = (
+                            f"{item.title} › {chunk.breadcrumb}"
+                            if chunk.breadcrumb
+                            else item.title
+                        )
                         chunk_hash = hashlib.sha256(piece.encode("utf-8")).hexdigest()
                         chunk_id = stable_chunk_id(item.document_id, ordinal)
                         connection.execute(
                             """
                             INSERT INTO chunks(
                                 id, document_id, ordinal, title, content, content_hash,
-                                embedding, embedding_model, embedding_dimensions, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                embedding, embedding_model, embedding_dimensions,
+                                embedding_input_hash, chunker_version, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 chunk_id,
                                 item.document_id,
                                 ordinal,
-                                item.title,
+                                chunk_title,
                                 piece,
                                 chunk_hash,
                                 vector.tobytes(),
                                 self.embedder.model_name,
                                 self.embedder.dimensions,
+                                hashlib.sha256(
+                                    _embedding_text(item, chunk).encode("utf-8")
+                                ).hexdigest(),
+                                CHUNKER_VERSION,
                                 now,
                             ),
                         )
@@ -1128,7 +1537,9 @@ class KnowledgeStore:
                             source=item.source,
                             project=item.project,
                             content_hash=chunk_hash,
-                            producer="paragraph_chunker",
+                            producer=(
+                                "heading_chunker" if chunk.breadcrumb else "paragraph_chunker"
+                            ),
                             producer_version=(
                                 f"{self.settings.chunk_size}:"
                                 f"{self.settings.chunk_overlap}:schema-v3"
@@ -1311,12 +1722,48 @@ class KnowledgeStore:
                 connection.rollback()
                 raise
 
-    def reconcile_source(self, source: str, seen_keys: Iterable[str]) -> int:
-        """Remove stale derived documents only after a successful source scan."""
+    def reconcile_source(
+        self,
+        source: str,
+        seen_keys: Iterable[str],
+        *,
+        reason: str = "source_absent",
+        allow_large: bool = False,
+    ) -> int:
+        """Remove stale derived documents only after a successful source scan.
+
+        Guarded by a sanity floor. Several scan paths fail *open*: a truncated
+        Hermes export still exits 0, and an upstream format change that drops the
+        timestamp field makes every message look older than the cutoff. Either
+        one yields a near-empty scan that looks indistinguishable from "the user
+        deleted everything", and reconciliation would then delete the entire
+        source. Refusing to reconcile an implausibly small scan turns silent
+        mass deletion into a visible, recoverable failure.
+        """
 
         safe_source = redact_text(source.strip().casefold())
         safe_keys = [(redact_text(key),) for key in set(seen_keys)]
+        floor_ratio = self.settings.reconcile_min_ratio
         with self._connect() as connection:
+            indexed = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM documents WHERE source = ? AND kind = 'derived'",
+                    (safe_source,),
+                ).fetchone()[0]
+            )
+            # The floor targets mass deletion. Applying it to a source holding a
+            # handful of documents would block ordinary cleanup without
+            # protecting anything worth protecting.
+            if (
+                not allow_large
+                and indexed >= _RECONCILE_FLOOR_MIN_DOCUMENTS
+                and len(safe_keys) < indexed * floor_ratio
+            ):
+                raise ReconcileFloorNotMet(
+                    f"Refusing to reconcile {safe_source}: the scan reported "
+                    f"{len(safe_keys)} keys against {indexed} indexed documents, "
+                    f"below the {floor_ratio:.0%} floor. Nothing was deleted."
+                )
             connection.execute("BEGIN IMMEDIATE")
             try:
                 connection.execute("CREATE TEMP TABLE IF NOT EXISTS scan_seen(source_key TEXT PRIMARY KEY)")
@@ -1335,10 +1782,14 @@ class KnowledgeStore:
                     (safe_source,),
                 ).fetchall()
                 for row in stale_rows:
+                    # A flat "source_reconciliation" made every deletion look
+                    # alike, so an audit could not tell a genuinely removed file
+                    # from one that merely grew past the size limit or stopped
+                    # decoding. Record which it was.
                     self._record_deletion_manifest(
                         connection,
                         row,
-                        reason="source_reconciliation",
+                        reason=f"source_reconciliation:{reason}",
                     )
                 cursor = connection.execute(
                     """
@@ -1365,14 +1816,26 @@ class KnowledgeStore:
         *,
         now: str,
     ) -> int:
+        # A lease is orphaned when it has outlived its expiry *or* when its
+        # heartbeat has gone quiet for far longer than the beat interval. Keying
+        # only on expiry meant that killing a refresh locked the database for the
+        # remainder of a 30-minute lease even though the owning process was
+        # provably gone seconds later. Mutual exclusion does not depend on this:
+        # `runlock.ingestion_lock` is an OS file lock the kernel releases when the
+        # process dies, so a second refresh still cannot start while one is truly
+        # alive. The lease is bookkeeping on top of that.
+        silent_before = _iso(
+            datetime.now(timezone.utc) - timedelta(seconds=_LEASE_HEARTBEAT_GRACE_SECONDS)
+        )
         stale = connection.execute(
             """
             SELECT r.run_id
             FROM refresh_runs r
             JOIN refresh_lease l ON l.run_id = r.run_id
-            WHERE r.status = 'running' AND l.expires_at <= ?
+            WHERE r.status = 'running'
+              AND (l.expires_at <= ? OR l.heartbeat_at <= ?)
             """,
-            (now,),
+            (now, silent_before),
         ).fetchall()
         run_ids = [str(row["run_id"]) for row in stale]
         if run_ids:
@@ -1811,7 +2274,6 @@ class KnowledgeStore:
                 dimensions=self.embedder.dimensions,
                 keys=keys,
                 vectors=vectors,
-                positions={int(key): index for index, key in enumerate(keys)},
                 sources=np.asarray([str(row["source"]) for row in valid], dtype=object),
                 projects=np.asarray(
                     [str(row["project"]) if row["project"] is not None else None for row in valid],
@@ -1881,7 +2343,15 @@ class KnowledgeStore:
                     ).fetchone()[0]
                 )
             timings.append((time.perf_counter() - started) * 1000.0)
-        median_ms = float(statistics.median(timings))
+        # The first run builds the ~100 MB snapshot; later runs hit the cache.
+        # Taking a plain median over [cold, warm, warm] silently reported the
+        # warm figure while looking like it summarised all three. Separate them:
+        # the warm number drives activation because a long-lived MCP worker pays
+        # it on every query, while the cold number is the once-per-generation
+        # cost worth watching after each refresh invalidates the snapshot.
+        cold_ms = float(timings[0])
+        warm_samples = timings[1:] or timings
+        median_ms = float(statistics.median(warm_samples))
         with self._connect() as connection:
             connection.execute(
                 """
@@ -1891,7 +2361,13 @@ class KnowledgeStore:
                 """,
                 (median_ms, count, _iso(None)),
             )
-        return {"runs_ms": [round(item, 3) for item in timings], "median_ms": median_ms, "chunks": count}
+        return {
+            "runs_ms": [round(item, 3) for item in timings],
+            "cold_ms": round(cold_ms, 3),
+            "warm_median_ms": round(median_ms, 3),
+            "median_ms": median_ms,
+            "chunks": count,
+        }
 
     def rebuild_vector_index(self, *, force: bool = False) -> dict[str, Any]:
         with self._connect() as connection:
@@ -1908,6 +2384,15 @@ class KnowledgeStore:
             ).fetchall()
         count = len(rows)
         configured = self.settings.vector_search.backend
+        # Structural limit worth stating plainly: the ANN path requires an
+        # unfiltered query (`unfiltered = not filters` gates it in
+        # `_vector_candidates`), and the MCP server passes client roots on every
+        # call, so any correctly-scoped search resolves to a project filter and
+        # takes the exact path. The sidecar can therefore only ever serve
+        # unscoped global search - the case that needs it least. Exact search
+        # also pre-filters before the matmul, so a scoped query already scans
+        # only its own project. Keep the thresholds high and treat an active
+        # sidecar as the exception, not the goal.
         eligible = (
             count >= self.settings.vector_search.ann_min_chunks
             or benchmark >= self.settings.vector_search.ann_latency_threshold_ms
@@ -2505,6 +2990,16 @@ class KnowledgeStore:
         source: str,
         project: str | None,
     ) -> dict[str, Any]:
+        """Record a terminal policy block for a document and all of its units.
+
+        The document row is terminal (``blocked``) but the unit rows used to be
+        set to ``pending``, which reads as retryable work. Because the
+        blocked-decision cache short-circuits these documents, those units were
+        never retried and never completed: the pipeline could not converge and
+        ``kb_stats`` reported outstanding work that would never finish. 612 units
+        sat in that state. ``policy_blocked`` is terminal and countable.
+        """
+
         now = _iso(None)
         safe_reason = redact_text(reason)[:200]
         for unit in units:
@@ -2545,7 +3040,7 @@ class KnowledgeStore:
                 connection.execute(
                     """
                     UPDATE distillation_unit_state
-                    SET status = 'pending', last_error = ?
+                    SET status = 'policy_blocked', last_error = ?
                     WHERE document_id = ?
                     """,
                     (safe_reason, document_id),
@@ -3236,8 +3731,127 @@ class KnowledgeStore:
             "last_error": failure["last_error"] if failure else None,
         }
 
-    def evaluate_distillations(self, *, limit: int = 24) -> dict[str, Any]:
+    @staticmethod
+    def _label_relevance(case: Mapping[str, Any]) -> dict[str, float]:
+        """Map ``document_id -> gain`` for a labelled evaluation case."""
+
+        relevant = case.get("relevant")
+        if isinstance(relevant, list) and relevant:
+            graded: dict[str, float] = {}
+            for item in relevant:
+                if isinstance(item, Mapping):
+                    document_id = str(item.get("document_id") or "").strip()
+                    gain = float(item.get("gain", 1.0))
+                else:
+                    document_id, gain = str(item).strip(), 1.0
+                if document_id and gain > 0:
+                    graded[document_id] = gain
+            if graded:
+                return graded
+        expected = case.get("expected_document_id")
+        return {str(expected): 1.0} if expected else {}
+
+    def _held_out_distillation_quality(self, label_path: Path) -> dict[str, Any]:
+        """Measure the distillation channel against human-written queries.
+
+        The self-retrieval check below asks whether a distillation can find its
+        own source document using a query generated *from* that document.  That
+        is a traceability check, not a quality measure: a model that copies
+        distinctive strings out of the dialogue scores near-perfectly by
+        construction.  Only held-out human labels can say whether the channel
+        helps a real question.
+        """
+
+        if not label_path.exists():
+            return {"available": False, "reason": "label_set_missing"}
+        try:
+            payload = json.loads(label_path.read_text(encoding="utf-8"))
+            cases = payload.get("cases")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return {"available": False, "reason": redact_text(str(exc))[:200]}
+        if not isinstance(cases, list) or not cases:
+            return {"available": False, "reason": "label_set_empty"}
+
+        def rank(results: Sequence[Mapping[str, Any]], relevance: Mapping[str, float]) -> int | None:
+            return next(
+                (
+                    index
+                    for index, item in enumerate(results, start=1)
+                    if str(item["document_id"]) in relevance
+                ),
+                None,
+            )
+
+        without: list[int | None] = []
+        with_channel: list[int | None] = []
+        for case in cases:
+            if not isinstance(case, dict):
+                continue
+            relevance = self._label_relevance(case)
+            query = str(case.get("query") or "").strip()
+            if not relevance or not query:
+                continue
+            sources = [str(case["source"])] if case.get("source") else None
+            # Reranking is held off on both sides so the comparison isolates the
+            # retrieval channel rather than cross-encoder noise.
+            without.append(
+                rank(
+                    self.search_response(
+                        query, limit=8, sources=sources, global_search=True,
+                        rerank=False, include_distillations=False,
+                    )["results"],
+                    relevance,
+                )
+            )
+            with_channel.append(
+                rank(
+                    self.search_response(
+                        query, limit=8, sources=sources, global_search=True,
+                        rerank=False, include_distillations=True,
+                    )["results"],
+                    relevance,
+                )
+            )
+
+        def metrics(ranks: Sequence[int | None]) -> dict[str, float]:
+            count = len(ranks)
+            if not count:
+                return {"recall_at_8": 0.0, "mrr_at_8": 0.0}
+            return {
+                "recall_at_8": round(
+                    sum(item is not None and item <= 8 for item in ranks) / count, 6
+                ),
+                "mrr_at_8": round(
+                    sum((1.0 / item) if item else 0.0 for item in ranks) / count, 6
+                ),
+            }
+
+        if not without:
+            return {"available": False, "reason": "no_usable_labelled_cases"}
+        off = metrics(without)
+        on = metrics(with_channel)
+        return {
+            "available": True,
+            "label_set": str(label_path.resolve()),
+            "cases": len(without),
+            "distillations_off": off,
+            "distillations_on": on,
+            "recall_delta": round(on["recall_at_8"] - off["recall_at_8"], 6),
+            "mrr_delta": round(on["mrr_at_8"] - off["mrr_at_8"], 6),
+            "not_harmful": bool(
+                on["recall_at_8"] >= off["recall_at_8"] and on["mrr_at_8"] >= off["mrr_at_8"]
+            ),
+        }
+
+    def evaluate_distillations(
+        self,
+        *,
+        limit: int = 24,
+        label_path: Path | None = None,
+    ) -> dict[str, Any]:
         limit = min(max(1, int(limit)), 100)
+        if label_path is None:
+            label_path = self.settings.canary_suite_path.parent / "search-quality-baseline.json"
         pilot_join = (
             "JOIN distillation_pilot_documents p ON p.document_id = x.document_id"
             if self.settings.distillation.mode == "pilot"
@@ -3327,20 +3941,32 @@ class KnowledgeStore:
             if baseline_mrr > 0
             else (1.0 if augmented_metrics["mrr_at_8"] > 0 else 0.0)
         )
+        held_out = self._held_out_distillation_quality(label_path)
+        # The gate is driven by held-out human labels. The self-retrieval numbers
+        # are reported for traceability but cannot pass the gate on their own:
+        # their queries are generated from the documents they must retrieve, so a
+        # high score there is guaranteed by construction rather than earned.
         automated_gate = bool(
             cases
             and schema_valid
             and secret_free
-            and augmented_metrics["recall_at_8"] >= baseline_metrics["recall_at_8"]
-            and improvement >= 0.05
+            and held_out.get("available")
+            and held_out.get("not_harmful")
         )
         return {
             "cases": len(cases),
             "schema_valid": schema_valid,
             "secret_free": secret_free,
-            "baseline": baseline_metrics,
-            "augmented": augmented_metrics,
-            "mrr_relative_improvement": round(improvement, 6),
+            "self_retrieval": {
+                "note": (
+                    "Traceability only: queries are derived from the documents "
+                    "they must retrieve, so these numbers are not a quality measure."
+                ),
+                "baseline": baseline_metrics,
+                "augmented": augmented_metrics,
+                "mrr_relative_improvement": round(improvement, 6),
+            },
+            "held_out_quality": held_out,
             "automated_gate_passed": automated_gate,
             "manual_traceability_audit_required": True,
             "promotion_ready": False,
@@ -3348,12 +3974,74 @@ class KnowledgeStore:
         }
 
     @staticmethod
-    def _fts_query(query: str) -> str | None:
-        tokens = re.findall(r"[\w'-]+", query.casefold(), flags=re.UNICODE)
+    def _fts_query(query: str, *, rarity: Mapping[str, int] | None = None) -> str | None:
+        """Build the FTS5 MATCH expression for a query.
+
+        Two changes over a plain OR of every token. Content-free words are
+        dropped, because BM25 fixes their *ranking* contribution but not their
+        consumption of the fixed candidate budget: a document matching only
+        "what"/"did"/"about" can still crowd a genuinely relevant one out of the
+        top 50 before scoring ever happens. And when the term cap bites, terms
+        are dropped by falling corpus rarity, so the cap sheds common words
+        rather than truncating whatever happened to be typed last.
+        """
+
+        tokens = _query_tokens(query)
         if not tokens:
             return None
-        unique = list(dict.fromkeys(tokens))[:24]
-        return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in unique)
+        # Keep stopwords only if the query is nothing but stopwords.
+        content = [token for token in tokens if token not in _STOPWORDS] or tokens
+        if len(content) > _MAX_FTS_TERMS:
+            if rarity:
+                # Rarer terms first; unknown terms are treated as maximally rare
+                # because they cannot have inflated the candidate set.
+                content.sort(key=lambda token: rarity.get(token, 0))
+            content = content[:_MAX_FTS_TERMS]
+        return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in content)
+
+    def _fts_query_for(
+        self,
+        connection: sqlite3.Connection,
+        query: str,
+    ) -> str | None:
+        """``_fts_query`` with corpus rarity supplied only when the cap bites."""
+
+        tokens = _query_tokens(query)
+        content = [token for token in tokens if token not in _STOPWORDS] or tokens
+        rarity = (
+            self._term_document_frequency(connection, content)
+            if len(content) > _MAX_FTS_TERMS
+            else None
+        )
+        return self._fts_query(query, rarity=rarity)
+
+    def _term_document_frequency(
+        self,
+        connection: sqlite3.Connection,
+        terms: Sequence[str],
+    ) -> dict[str, int]:
+        """Corpus document frequency per term, via FTS5's vocabulary table.
+
+        ``fts5vocab`` is created in the temp schema so this needs no migration
+        and no extra stored state.
+        """
+
+        if not terms:
+            return {}
+        try:
+            connection.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS temp.chunks_vocab "
+                "USING fts5vocab(main, chunks_fts, 'row')"
+            )
+            placeholders = ",".join("?" for _ in terms)
+            rows = connection.execute(
+                f"SELECT term, doc FROM temp.chunks_vocab WHERE term IN ({placeholders})",
+                tuple(terms),
+            ).fetchall()
+        except sqlite3.Error:
+            # Rarity ordering is an optimisation; losing it must not fail search.
+            return {}
+        return {str(row["term"]): int(row["doc"]) for row in rows}
 
     @staticmethod
     def _filter_sql(
@@ -3375,10 +4063,109 @@ class KnowledgeStore:
         return (" AND " + " AND ".join(clauses)) if clauses else "", params
 
     @staticmethod
-    def _snippet(content: str, query: str, length: int = 700) -> str:
+    def _snippet(
+        content: str,
+        query: str,
+        length: int = 700,
+        *,
+        terms: Sequence[str] | None = None,
+    ) -> str:
+        """Return the densest query-relevant window of ``content``.
+
+        The previous implementation anchored on ``min(content.find(term))``:
+        the *earliest* occurrence of *any* term, matched as a raw substring.
+        Short tokens such as ``i``, ``a``, ``do`` or ``the`` occur inside some
+        word within the first few characters of nearly any chunk, so the window
+        collapsed to the head of the chunk for 82-100% of real chunks. Because
+        this text is what the cross-encoder scores, the most expensive stage of
+        retrieval was usually reading the wrong part of the document.
+
+        Selection is now word-boundary based, ignores content-free tokens, and
+        scores candidate windows by how many *distinct* terms they cover.
+        """
+
         if len(content) <= length:
             return content
-        terms = re.findall(r"[\w'-]+", query.casefold())
+        selected = [
+            term
+            for term in (terms if terms is not None else _query_tokens(query))
+            if term not in _STOPWORDS and len(term) > 1
+        ]
+        if not selected:
+            # Nothing content-bearing to centre on; the head is as good as any
+            # other window, but say so explicitly rather than by accident.
+            return content[:length].strip() + "…"
+
+        wanted = set(selected)
+        lowered = content.casefold()
+        hits = [
+            (match.start(), match.group(0))
+            for match in _WORD_RE.finditer(lowered)
+            if match.group(0) in wanted
+        ]
+        if not hits:
+            return content[:length].strip() + "…"
+
+        # Slide a window anchored on each hit and keep the one covering the most
+        # distinct terms, breaking ties on total hits and then earliest position.
+        best_left, best_right = 0, 1
+        best_key = (-1, 1)
+        right = 0
+        for left, (position, _term) in enumerate(hits):
+            while right < len(hits) and hits[right][0] < position + length:
+                right += 1
+            distinct = len({term for _pos, term in hits[left:right]})
+            last_position, last_term = hits[right - 1]
+            span = (last_position + len(last_term)) - position
+            # Most distinct terms wins; ties go to the tightest span. Preferring
+            # more *hits* instead would favour a window padded with repeats of
+            # one term, pushing the rarer terms past the window edge.
+            key = (distinct, -span)
+            if key > best_key:
+                best_key = key
+                best_left, best_right = left, right
+
+        # Centre on the matched *span*, not on its left edge: backing off from
+        # the first hit would push the window left and drop the later terms that
+        # made this window the best one.
+        span_start = hits[best_left][0]
+        last_position, last_term = hits[best_right - 1]
+        span_end = last_position + len(last_term)
+        centre = (span_start + span_end) // 2
+        start = max(0, centre - length // 2)
+        start = min(start, max(0, len(content) - length))
+        end = min(len(content), start + length)
+        prefix = "…" if start else ""
+        suffix = "…" if end < len(content) else ""
+        return f"{prefix}{content[start:end].strip()}{suffix}"
+
+    @staticmethod
+    def _rerank_passage(content: str, query: str, length: int) -> str:
+        """Build the passage text handed to the cross-encoder.
+
+        This deliberately does *not* use the query-centred window from
+        ``_snippet``, despite that window being objectively better at containing
+        the query terms (99.5% of eligible chunks versus 67.8%). Measured on the
+        24-case gold set, switching this call site to the centred window moved
+        MRR@8 from 0.7604 to 0.6386 and nDCG@10 from 0.8184 to 0.7291. A pure
+        head-of-chunk passage was worse still at 0.5980.
+
+        The reranker scores one anchor per *document*, so what it needs is a
+        document-identity signal, and the opening region of a chunk carries the
+        section heading that the chunk text itself never records.
+
+        The obvious counter-hypothesis has been tested and rejected: once heading
+        breadcrumbs were added to the embedded text, the centred window was
+        re-measured on the same gold set and still lost badly - MRR@8 0.6577
+        against 0.7865 for this head-biased passage, with recall@8 dropping from
+        1.0 to 0.9583. Breadcrumbs did not rescue it. Do not switch this call
+        site to ``_snippet`` without new evidence; two independent measurements
+        now say it is worse.
+        """
+
+        if len(content) <= length:
+            return content
+        terms = _query_tokens(query)
         lowered = content.casefold()
         positions = [lowered.find(term) for term in terms]
         position = min((item for item in positions if item >= 0), default=0)
@@ -3448,10 +4235,16 @@ class KnowledgeStore:
         filter_params: Sequence[Any],
         limit: int,
     ) -> tuple[list[int], dict[int, str]]:
-        fts_query = self._fts_query(safe_query)
+        fts_query = self._fts_query_for(connection, safe_query)
         lexical_rank: dict[int, int] = {}
         vector_rank: dict[int, int] = {}
         rows_by_pk: dict[int, sqlite3.Row] = {}
+        # Only these columns are read downstream.  Selecting ``x.*`` would drag
+        # the embedding blob, summary_json and search_text of every candidate
+        # through the query for nothing.
+        unit_columns = (
+            "x.distillation_pk, x.id, x.document_id, x.start_ordinal, x.end_ordinal"
+        )
         pilot_join = (
             "JOIN distillation_pilot_documents p ON p.document_id = x.document_id"
             if self.settings.distillation.mode == "pilot"
@@ -3460,7 +4253,7 @@ class KnowledgeStore:
         if fts_query:
             rows = connection.execute(
                 f"""
-                SELECT x.*, bm25(distillations_fts) AS lexical_score
+                SELECT {unit_columns}, bm25(distillations_fts) AS lexical_score
                 FROM distillations_fts
                 JOIN distillations x ON x.distillation_pk = distillations_fts.rowid
                 {pilot_join}
@@ -3478,9 +4271,13 @@ class KnowledgeStore:
                 lexical_rank[key] = rank
 
         heap: list[tuple[float, int]] = []
+        # This scan is unbounded -- it visits every ready distillation matching
+        # the current model.  Stream only the key and the vector, and retain
+        # nothing beyond the bounded heap: materialising each visited row here
+        # made peak memory scale with corpus size on every search.
         vector_rows = connection.execute(
             f"""
-            SELECT x.* FROM distillations x
+            SELECT x.distillation_pk, x.embedding FROM distillations x
             {pilot_join}
             JOIN documents d ON d.id = x.document_id
             JOIN distillation_state s
@@ -3498,9 +4295,22 @@ class KnowledgeStore:
                 heapq.heappush(heap, candidate)
             elif candidate > heap[0]:
                 heapq.heapreplace(heap, candidate)
-            rows_by_pk[int(row["distillation_pk"])] = row
         for rank, (_, key) in enumerate(sorted(heap, reverse=True), start=1):
             vector_rank[key] = rank
+
+        # Fetch the surviving vector winners' metadata once, in bounded batches.
+        missing = sorted(set(vector_rank) - set(rows_by_pk))
+        for start in range(0, len(missing), _SQL_PARAM_BATCH):
+            window = missing[start : start + _SQL_PARAM_BATCH]
+            placeholders = ",".join("?" for _ in window)
+            for row in connection.execute(
+                f"""
+                SELECT {unit_columns} FROM distillations x
+                WHERE x.distillation_pk IN ({placeholders})
+                """,
+                window,
+            ):
+                rows_by_pk[int(row["distillation_pk"])] = row
 
         ranked_units: list[tuple[float, int]] = []
         for key in set(lexical_rank) | set(vector_rank):
@@ -3514,36 +4324,52 @@ class KnowledgeStore:
 
         chosen_by_document: dict[str, sqlite3.Row] = {}
         for _, key in ranked_units:
-            row = rows_by_pk[key]
+            # A concurrent refresh can delete a unit between the scan above and
+            # the metadata fetch, so tolerate a missing row rather than failing
+            # the whole search.
+            row = rows_by_pk.get(key)
+            if row is None:
+                continue
             chosen_by_document.setdefault(str(row["document_id"]), row)
             if len(chosen_by_document) >= limit:
                 break
 
         anchors: list[int] = []
         matched: dict[int, str] = {}
+        expected_bytes = self.embedder.dimensions * 4
+        # One indexed lookup per chosen document.  Folding these into a single
+        # statement with OR'd (document_id, ordinal) clauses was measured and
+        # rejected: SQLite abandons idx_chunks_document for idx_chunks_model,
+        # scanning every chunk of the active model and sorting the result --
+        # 277ms against 3.1ms for the fifty separate seeks it replaced.
         for row in chosen_by_document.values():
-            raw_rows = connection.execute(
-                """
-                SELECT chunk_pk, embedding FROM chunks
-                WHERE document_id = ? AND ordinal BETWEEN ? AND ?
-                  AND embedding_model = ? AND embedding_dimensions = ?
-                """,
-                (
-                    row["document_id"],
-                    int(row["start_ordinal"]),
-                    int(row["end_ordinal"]),
-                    self.embedder.model_name,
-                    self.embedder.dimensions,
-                ),
-            ).fetchall()
-            if not raw_rows:
+            candidates = [
+                candidate
+                for candidate in connection.execute(
+                    """
+                    SELECT chunk_pk, embedding FROM chunks
+                    WHERE document_id = ? AND ordinal BETWEEN ? AND ?
+                      AND embedding_model = ? AND embedding_dimensions = ?
+                    """,
+                    (
+                        row["document_id"],
+                        int(row["start_ordinal"]),
+                        int(row["end_ordinal"]),
+                        self.embedder.model_name,
+                        self.embedder.dimensions,
+                    ),
+                )
+                if len(candidate["embedding"]) == expected_bytes
+            ]
+            if not candidates:
                 continue
-            best = max(
-                raw_rows,
-                key=lambda item: float(
-                    np.dot(query_vector, np.frombuffer(item["embedding"], dtype=np.float32))
-                ),
-            )
+            # One matmul over the range instead of re-running frombuffer and dot
+            # inside a comparator for every pairwise comparison.
+            matrix = np.frombuffer(
+                b"".join(candidate["embedding"] for candidate in candidates),
+                dtype=np.float32,
+            ).reshape(len(candidates), self.embedder.dimensions)
+            best = candidates[int(np.argmax(matrix @ query_vector))]
             chunk_key = int(best["chunk_pk"])
             anchors.append(chunk_key)
             matched[chunk_key] = str(row["id"])
@@ -3627,7 +4453,7 @@ class KnowledgeStore:
         distillation_match: dict[int, str] = {}
 
         with self._connect() as connection:
-            fts_query = self._fts_query(safe_query)
+            fts_query = self._fts_query_for(connection, safe_query)
             if fts_query:
                 lexical_rows = connection.execute(
                     f"""
@@ -3676,18 +4502,24 @@ class KnowledgeStore:
                     key: rank_number for rank_number, key in enumerate(distillation_keys, start=1)
                 }
 
-            missing_keys = (
-                set(vector_rank) | set(distillation_rank)
-            ) - set(records)
-            if missing_keys:
-                placeholders = ",".join("?" for _ in missing_keys)
+            # Up to two candidate_limit-sized rank sets land here.  The
+            # configured cap keeps this well inside SQLITE_LIMIT_VARIABLE_NUMBER
+            # (32,766), so batching is defence in depth rather than a live fix:
+            # it keeps the bound local to this query instead of resting on a
+            # clamp in config.py, matching _reusable_embeddings.
+            missing_keys = sorted(
+                (set(vector_rank) | set(distillation_rank)) - set(records)
+            )
+            for start in range(0, len(missing_keys), _SQL_PARAM_BATCH):
+                window = missing_keys[start : start + _SQL_PARAM_BATCH]
+                placeholders = ",".join("?" for _ in window)
                 rows = connection.execute(
                     f"""
                     SELECT {detail_columns} FROM chunks c
                     JOIN documents d ON d.id = c.document_id
                     WHERE c.chunk_pk IN ({placeholders})
                     """,
-                    sorted(missing_keys),
+                    window,
                 ).fetchall()
                 records.update({int(row["chunk_pk"]): row for row in rows})
 
@@ -3772,10 +4604,21 @@ class KnowledgeStore:
                     choices.append(("anchor", [anchor]))
                 for direction, context_rows in choices:
                     variant_id = f"{anchor['document_id']}:{direction}"
-                    snippets = [self._snippet(str(row["content"]), safe_query) for row in context_rows]
-                    rerank_budget = max(100, 700 // len(context_rows))
+                    # Returned evidence recomputes its own snippets below, once
+                    # the winning variant is known; computing them here for every
+                    # candidate variant was pure waste on the latency-sensitive
+                    # path (~80 discarded densest-window scans per query).
+                    #
+                    # Widening this budget was measured and rejected: raising it
+                    # to 1400 characters cost roughly 2x warm p95 (1400ms ->
+                    # 2700ms) without improving MRR@8 or nDCG@10 over the 700
+                    # baseline. The cross-encoder's 512-token ceiling means the
+                    # extra text is largely truncated anyway.
+                    rerank_budget = max(100, _RERANK_PASSAGE_BUDGET // len(context_rows))
                     rerank_snippets = [
-                        self._snippet(str(row["content"]), safe_query, length=rerank_budget)
+                        self._rerank_passage(
+                            str(row["content"]), safe_query, rerank_budget
+                        )
                         for row in context_rows
                     ]
                     variants[variant_id] = {
@@ -4180,8 +5023,10 @@ class KnowledgeStore:
             "latest": dict(latest) if latest is not None else None,
         }
 
-    def stats(self) -> dict[str, Any]:
-        recovered_refreshes = self.recover_stale_refreshes()
+    def stats(self, *, recover: bool = True) -> dict[str, Any]:
+        # Recovery writes. Callers that advertise themselves as read-only must
+        # pass recover=False; the refresh path performs recovery explicitly.
+        recovered_refreshes = self.recover_stale_refreshes() if recover else 0
         with self._connect() as connection:
             document_count = int(connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0])
             chunk_count = int(connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])

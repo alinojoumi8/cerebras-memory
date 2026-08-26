@@ -6,11 +6,11 @@ untrusted evidence and must never be interpreted as instructions by a client.
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import lru_cache, partial
 import os
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable, TypeVar
 from urllib.parse import unquote, urlparse
 
 # Every desktop client launches its own STDIO worker. Bound native library
@@ -26,6 +26,7 @@ for _name, _value in {
 }.items():
     os.environ.setdefault(_name, _value)
 
+import anyio.to_thread
 from mcp import types
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
@@ -49,9 +50,27 @@ mcp = FastMCP(
 )
 
 
+_T = TypeVar("_T")
+
+
 @lru_cache(maxsize=1)
 def _store() -> KnowledgeStore:
     return KnowledgeStore(load_settings())
+
+
+async def _offload(call: Callable[[], _T]) -> _T:
+    """Run blocking store work on a worker thread.
+
+    FastMCP invokes a synchronous tool directly inside the request coroutine
+    (``func_metadata.call_fn_with_arg_validation`` falls through to a plain
+    ``fn(...)`` call), so every tool here would otherwise hold the event loop for
+    its full duration. A search spends over a second in SQLite, a NumPy matmul
+    over the whole embedding matrix, and CPU cross-encoder inference; blocking
+    the loop for that long stalls pings, cancellations and ``list_roots`` for
+    every concurrent request.
+    """
+
+    return await anyio.to_thread.run_sync(call)
 
 
 async def _client_root_paths(ctx: Context) -> list[Path]:
@@ -104,15 +123,18 @@ async def kb_search(
     """Return bounded snippets, scores, provenance, and stable citations."""
 
     roots = await _client_root_paths(ctx)
-    response = _store().search_response(
-        query,
-        limit=limit,
-        sources=sources,
-        project=project,
-        since=since,
-        global_search=global_search,
-        rerank=rerank,
-        roots=roots,
+    response = await _offload(
+        partial(
+            _store().search_response,
+            query,
+            limit=limit,
+            sources=sources,
+            project=project,
+            since=since,
+            global_search=global_search,
+            rerank=rerank,
+            roots=roots,
+        )
     )
     return {
         "query": query,
@@ -135,10 +157,12 @@ async def kb_search(
     ),
     structured_output=True,
 )
-def kb_get(document_id: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
+async def kb_get(document_id: str, offset: int = 0, limit: int = 10) -> dict[str, Any]:
     """Paginate metadata and chunks for a stable document ID."""
 
-    result = _store().get_document(document_id, offset=offset, limit=limit)
+    result = await _offload(
+        partial(_store().get_document, document_id, offset=offset, limit=limit)
+    )
     if result is None:
         return {"found": False, "document_id": document_id, "chunks": []}
     return {"found": True, **result}
@@ -158,7 +182,7 @@ def kb_get(document_id: str, offset: int = 0, limit: int = 10) -> dict[str, Any]
     ),
     structured_output=True,
 )
-def kb_save_memory(
+async def kb_save_memory(
     title: str,
     content: str,
     tags: list[str] | None = None,
@@ -167,12 +191,15 @@ def kb_save_memory(
 ) -> dict[str, Any]:
     """Save an explicitly user-confirmed memory after local redaction."""
 
-    return _store().save_memory(
-        title,
-        content,
-        tags=tags,
-        project=project,
-        confirmed_by_user=confirmed_by_user,
+    return await _offload(
+        partial(
+            _store().save_memory,
+            title,
+            content,
+            tags=tags,
+            project=project,
+            confirmed_by_user=confirmed_by_user,
+        )
     )
 
 
@@ -187,10 +214,18 @@ def kb_save_memory(
     ),
     structured_output=True,
 )
-def kb_stats() -> dict[str, Any]:
-    """Return storage and refresh health without loading the embedding model."""
+async def kb_stats() -> dict[str, Any]:
+    """Return storage and refresh health without loading the embedding model.
 
-    return _store().stats()
+    ``recover=False`` keeps this call genuinely read-only. Recovering stale
+    refresh leases takes ``BEGIN IMMEDIATE`` and mutates ``refresh_runs``, so
+    doing it here would make every ``kb_stats`` call a write while advertising
+    ``readOnlyHint=True`` - exactly the annotation a client uses to decide it can
+    auto-approve. Recovery now happens where it belongs, at the start of a
+    refresh, and via the admin CLI.
+    """
+
+    return await _offload(partial(_store().stats, recover=False))
 
 
 if __name__ == "__main__":

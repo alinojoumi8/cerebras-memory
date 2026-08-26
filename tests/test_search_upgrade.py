@@ -57,6 +57,51 @@ def _three_chunk_text(anchor: str, neighbor: str = "NEXTMARK") -> str:
     return "\n\n".join((first, middle, last))
 
 
+def test_candidate_lookup_is_complete_across_batch_boundaries(settings_factory):
+    """The batched ``chunk_pk IN (...)`` lookup must return every record.
+
+    620 candidates span two _SQL_PARAM_BATCH windows, so a batching bug would
+    drop the tail and silently shrink the result set rather than raise.
+    """
+
+    settings = settings_factory(candidate_limit=900)
+    store = KnowledgeStore(settings, HashingEmbedder(32))
+    for index in range(620):
+        store.upsert_document(
+            _document(f"bulk-{index}", f"corpus filler document number {index}")
+        )
+
+    # A query that matches nothing lexically leaves every vector candidate
+    # absent from ``records``, so the whole rank set flows through the batched
+    # lookup instead of arriving via the FTS pass.
+    response = store.search_response(
+        "zzqx unrelated probe term", limit=8, rerank=False, global_search=True
+    )
+
+    assert len(response["results"]) == 8
+    assert len({result["document_id"] for result in response["results"]}) == 8
+    assert all(result["snippet"] for result in response["results"])
+
+
+def test_load_settings_clamps_candidate_limit(tmp_path):
+    import json as _json
+
+    from config import load_settings
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        _json.dumps({"candidate_limit": 5000, "database_path": str(tmp_path / "db.sqlite3")}),
+        encoding="utf-8",
+    )
+    assert load_settings(config_path).candidate_limit == 200
+
+    config_path.write_text(
+        _json.dumps({"candidate_limit": 1, "database_path": str(tmp_path / "db.sqlite3")}),
+        encoding="utf-8",
+    )
+    assert load_settings(config_path).candidate_limit == 10
+
+
 def test_document_deduplication_adjacent_context_and_stable_anchor(settings_factory):
     settings = settings_factory()
     store = KnowledgeStore(settings, HashingEmbedder(32))

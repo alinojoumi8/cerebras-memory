@@ -5,10 +5,23 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import sys
 import threading
 from typing import Callable
+
+# Idle ONNX worker threads busy-wait by default, which pegged every core
+# during the single-threaded SQLite write phase and starved the writer.
+# mcp_server.py already does this for the serving path.
+for _name, _value in {
+    "OMP_WAIT_POLICY": "PASSIVE",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+}.items():
+    os.environ.setdefault(_name, _value)
 
 from chunking import chunk_text
 from config import Settings, load_settings
@@ -17,7 +30,7 @@ from models import ScanResult
 from redaction import redact_text
 from runlock import IngestionAlreadyRunning, ingestion_lock
 from stdio import configure_utf8_stdio
-from store import KnowledgeStore, RefreshLease
+from store import KnowledgeStore, ReconcileFloorNotMet, RefreshLease
 
 
 Scanner = Callable[[Settings, datetime], ScanResult]
@@ -96,12 +109,23 @@ def _run_ingestion_body(
     force: bool = False,
     store: KnowledgeStore | None = None,
     heartbeat: _RefreshHeartbeat | None = None,
+    allow_large_reconcile: bool = False,
 ) -> dict[str, object]:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.transcript_days)
+    # A full rebuild deliberately ignores the rolling window. Re-applying it here
+    # would drop every aged-out session from the scan, and a rebuild is precisely
+    # when their chunks and embeddings are being regenerated - so the cutoff
+    # would delete the documents that retained_keys exists to preserve. Running a
+    # full rebuild is also how anything previously lost to the window is
+    # recovered, as long as the source file is still on disk.
+    cutoff = (
+        datetime.min.replace(tzinfo=timezone.utc)
+        if force
+        else datetime.now(timezone.utc) - timedelta(days=settings.transcript_days)
+    )
     if dry_run:
         store = None
     elif store is None:
-        store = KnowledgeStore(settings)
+        store = KnowledgeStore(settings, ingest_mode=True)
     report: dict[str, object] = {
         "mode": "dry-run" if dry_run else ("full" if force else "incremental"),
         "cutoff": cutoff.isoformat().replace("+00:00", "Z"),
@@ -175,7 +199,21 @@ def _run_ingestion_body(
         if write_failed:
             # Crucially, do not reconcile after any incomplete write pass.
             continue
-        deleted = store.reconcile_source(source, scan.seen_keys)
+        try:
+            deleted = store.reconcile_source(
+                source, scan.seen_keys, allow_large=allow_large_reconcile
+            )
+        except ReconcileFloorNotMet as exc:
+            # The scan succeeded but returned implausibly few keys. Treat that as
+            # a broken source rather than as the user deleting their history:
+            # nothing is removed, and the refusal is loud.
+            error = _safe_error(str(exc))
+            summary["status"] = "failed"
+            summary["error"] = error
+            summary["reconciled_deletions"] = 0
+            report["ok"] = False
+            store.record_ingest_failure(source, error)
+            continue
         summary.update(
             {
                 "imported": imported,
@@ -217,30 +255,38 @@ def _run_ingestion_body(
                 "status": "failed",
                 "error": _safe_error(f"Vector maintenance failed: {exc}"),
             }
-        if settings.canary_run_after_refresh:
-            if not settings.canary_suite_path.exists():
-                report["quality_gate"] = {
-                    "status": "skipped",
-                    "reason": "canary_suite_missing",
-                }
-            else:
-                try:
-                    from quality import evaluate_canary_suite
+    # Retrieval quality is measured even when a source scan failed. A partial
+    # refresh can still degrade ranking, and skipping the gate exactly when
+    # something already went wrong is how a regression stays invisible.
+    if store is not None and settings.canary_run_after_refresh:
+        if not settings.canary_suite_path.exists():
+            report["quality_gate"] = {
+                "status": "skipped",
+                "reason": "canary_suite_missing",
+            }
+        else:
+            try:
+                from quality import evaluate_canary_suite
 
-                    canary = evaluate_canary_suite(
-                        store,
-                        settings.canary_suite_path,
-                        record=True,
-                    )
-                    report["quality_gate"] = {
-                        "status": "passed" if canary["gate_passed"] else "failed",
-                        **canary,
-                    }
-                except Exception as exc:
-                    report["quality_gate"] = {
-                        "status": "failed",
-                        "error": _safe_error(f"Canary evaluation failed: {exc}"),
-                    }
+                canary = evaluate_canary_suite(
+                    store,
+                    settings.canary_suite_path,
+                    record=True,
+                )
+                report["quality_gate"] = {
+                    "status": "passed" if canary["gate_passed"] else "failed",
+                    **canary,
+                }
+            except Exception as exc:
+                report["quality_gate"] = {
+                    "status": "failed",
+                    "error": _safe_error(f"Canary evaluation failed: {exc}"),
+                }
+        # A failing gate must fail the refresh. Previously the verdict was
+        # recorded and then discarded, so a total retrieval collapse still
+        # exited 0 and reported LastTaskResult = 0 on the scheduled task.
+        if report["quality_gate"].get("status") == "failed":
+            report["ok"] = False
     return report
 
 
@@ -249,12 +295,20 @@ def run_ingestion(
     *,
     dry_run: bool = False,
     force: bool = False,
+    allow_large_reconcile: bool = False,
 ) -> dict[str, object]:
     if dry_run:
-        return _run_ingestion_body(settings, dry_run=True, force=force)
+        return _run_ingestion_body(
+            settings, dry_run=True, force=force,
+            allow_large_reconcile=allow_large_reconcile,
+        )
 
-    store = KnowledgeStore(settings)
+    store = KnowledgeStore(settings, ingest_mode=True)
     mode = "full" if force else "incremental"
+    # Reclaim leases orphaned by an interrupted refresh. This used to happen as a
+    # side effect of stats(), which made a nominally read-only call take a write
+    # lock; a refresh is the point at which a stale lease actually matters.
+    store.recover_stale_refreshes()
     lease = store.start_refresh_run(mode, lease_seconds=_REFRESH_LEASE_SECONDS)
     heartbeat = _RefreshHeartbeat(store, lease)
     heartbeat.start()
@@ -265,6 +319,7 @@ def run_ingestion(
             settings,
             dry_run=False,
             force=force,
+            allow_large_reconcile=allow_large_reconcile,
             store=store,
             heartbeat=heartbeat,
         )
@@ -301,6 +356,16 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--full", action="store_true", help="force replacement and re-embedding")
     mode.add_argument("--incremental", action="store_true", help="skip unchanged documents (default)")
     parser.add_argument("--config", type=Path, help="path to config JSON")
+    parser.add_argument(
+        "--allow-large-reconcile",
+        action="store_true",
+        help=(
+            "permit a reconcile that deletes more than the configured floor. "
+            "Only for deliberate cleanups such as newly excluding a directory; "
+            "the floor exists because a truncated scan is indistinguishable from "
+            "the user deleting their history."
+        ),
+    )
     return parser
 
 
@@ -311,7 +376,12 @@ def main(argv: list[str] | None = None) -> int:
     lock_path = settings.database_path.parent / "ingest.lock"
     try:
         with ingestion_lock(lock_path):
-            report = run_ingestion(settings, dry_run=args.dry_run, force=args.full)
+            report = run_ingestion(
+                settings,
+                dry_run=args.dry_run,
+                force=args.full,
+                allow_large_reconcile=args.allow_large_reconcile,
+            )
     except IngestionAlreadyRunning as exc:
         report = {"ok": False, "status": "overlap_prevented", "error": str(exc)}
     except Exception as exc:

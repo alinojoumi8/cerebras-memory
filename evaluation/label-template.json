@@ -1,0 +1,1298 @@
+{
+  "version": 2,
+  "description": "Graded relevance label set. Every case needs a human-written query. gain 3 = directly answers, 1 = useful supporting context. Delete _hint_title once the query is written; it exists only to remind you what the document is, and must not be pasted into the query, which would make the case circular.",
+  "cases": [
+    {
+      "label": "claude-Kimi_search_AI claude-1",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session 0d2a6556-cb7d-42d5-8a38-76585a5a0e24",
+      "relevant": [
+        {
+          "document_id": "doc_11a04125fc690a809b4af3bd21ab580e",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_search_AI claude"
+    },
+    {
+      "label": "claude-agent-economy-2",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session dc127dec-7518-4773-a012-a25652aeab3d",
+      "relevant": [
+        {
+          "document_id": "doc_55a52f6ed548e6ad8bea11ec062d1a82",
+          "gain": 3
+        }
+      ],
+      "scope_project": "agent-economy"
+    },
+    {
+      "label": "claude-agent-os-3",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session 18f651b3-791f-4331-b47e-18bcb79e5db7",
+      "relevant": [
+        {
+          "document_id": "doc_432d4c3f7e55cc899fcde09d8d15f3ef",
+          "gain": 3
+        }
+      ],
+      "scope_project": "agent-os"
+    },
+    {
+      "label": "claude-dorsa-4",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session 2032b82c-7411-4901-9b46-68626b68ebee",
+      "relevant": [
+        {
+          "document_id": "doc_02574b5a638c276c45e9f81d88315c6d",
+          "gain": 3
+        }
+      ],
+      "scope_project": "dorsa"
+    },
+    {
+      "label": "claude-dorsa1-5",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session 946e18e9-836b-4e31-9963-e0b9ca3fb117",
+      "relevant": [
+        {
+          "document_id": "doc_ccc1b5744979a01cea4d39459e4f86fc",
+          "gain": 3
+        }
+      ],
+      "scope_project": "dorsa1"
+    },
+    {
+      "label": "claude-game-6",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session 85454c20-e5d0-418c-b2f7-11b74022ffaa",
+      "relevant": [
+        {
+          "document_id": "doc_c3c9e3a8d9f0b562944863d2fb4dd204",
+          "gain": 3
+        }
+      ],
+      "scope_project": "game"
+    },
+    {
+      "label": "claude-judgeandjurry-claude-7",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session 8fa1993a-2102-455a-8316-5413b53f199d",
+      "relevant": [
+        {
+          "document_id": "doc_283940b357f61bcf789f971a0b323f62",
+          "gain": 3
+        }
+      ],
+      "scope_project": "judgeandjurry-claude"
+    },
+    {
+      "label": "claude-judgeandjurry-claude-v2-8",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session d5d634c6-de4c-41bd-b91c-c4f4601ce5a5",
+      "relevant": [
+        {
+          "document_id": "doc_7381bf0327d641ed99095a3c759ab826",
+          "gain": 3
+        }
+      ],
+      "scope_project": "judgeandjurry-claude-v2"
+    },
+    {
+      "label": "claude-judgeandjurry-codex-9",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session 1342f9d7-9a84-4691-8589-5adce7bb03b1",
+      "relevant": [
+        {
+          "document_id": "doc_cd9d99b108bf875ce4797633d7f61a42",
+          "gain": 3
+        }
+      ],
+      "scope_project": "judgeandjurry-codex"
+    },
+    {
+      "label": "claude-matri-10",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session b16b9e65-9859-460f-b5e2-8db83d6d872b",
+      "relevant": [
+        {
+          "document_id": "doc_c2a8c2a8612599d371dae503aaee97b5",
+          "gain": 3
+        }
+      ],
+      "scope_project": "matri"
+    },
+    {
+      "label": "claude-openclaw-crestodian-planner-GqS33x-11",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session 63dfd6a0-f065-4b3f-a853-79da3f02e0c7",
+      "relevant": [
+        {
+          "document_id": "doc_77d9f7df31e2068e349cee54833a1e86",
+          "gain": 3
+        }
+      ],
+      "scope_project": "openclaw-crestodian-planner-GqS33x"
+    },
+    {
+      "label": "claude-quanttrading-v1-12",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session 7189b1d2-9e17-4ad9-87be-061aa3d2c82b",
+      "relevant": [
+        {
+          "document_id": "doc_ef28fc3679e14d496853d632b6195e61",
+          "gain": 3
+        }
+      ],
+      "scope_project": "quanttrading-v1"
+    },
+    {
+      "label": "claude-rumi3-13",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session ac637dd6-a6b4-4ccb-a5b9-d0a37bec192b",
+      "relevant": [
+        {
+          "document_id": "doc_c850789f1ee73456d2d11eb81f8423ed",
+          "gain": 3
+        }
+      ],
+      "scope_project": "rumi3"
+    },
+    {
+      "label": "claude-rumi4-14",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session edb4543e-1eab-4c69-9d25-8bd4b129cfa5",
+      "relevant": [
+        {
+          "document_id": "doc_18263f28fc2e00e559b0760ef2a06425",
+          "gain": 3
+        }
+      ],
+      "scope_project": "rumi4"
+    },
+    {
+      "label": "claude-scratchpad-15",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session a8f0adef-eb03-4ae7-8b08-cc8389611d9f",
+      "relevant": [
+        {
+          "document_id": "doc_481985165b813c758f4015a9cdd9236b",
+          "gain": 3
+        }
+      ],
+      "scope_project": "scratchpad"
+    },
+    {
+      "label": "claude-selflearning-16",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session b6f42dac-8550-4d15-b08a-bf7e55b4348e",
+      "relevant": [
+        {
+          "document_id": "doc_0ab933c394c35934c726fac1a8d2473c",
+          "gain": 3
+        }
+      ],
+      "scope_project": "selflearning"
+    },
+    {
+      "label": "claude-worldsim-v1-17",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session a3697b0a-b66f-4019-85ce-4f2d44636efa",
+      "relevant": [
+        {
+          "document_id": "doc_d9725480aa81cf4b15a12eed3d69db3c",
+          "gain": 3
+        }
+      ],
+      "scope_project": "worldsim-v1"
+    },
+    {
+      "label": "claude-worldsim-v2-18",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session cc4808b6-784c-4791-96a3-9ffa7f9272be",
+      "relevant": [
+        {
+          "document_id": "doc_a0a8ebfaf63f4876ca86ecebb32d0018",
+          "gain": 3
+        }
+      ],
+      "scope_project": "worldsim-v2"
+    },
+    {
+      "label": "claude-worldsim-v3-19",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session 561c672b-71f6-4faf-84b9-bf0f2c0e6627",
+      "relevant": [
+        {
+          "document_id": "doc_e6666aefd82819788cc323cf5dc6a369",
+          "gain": 3
+        }
+      ],
+      "scope_project": "worldsim-v3"
+    },
+    {
+      "label": "claude-worldsimulator-20",
+      "source": "claude",
+      "query": "",
+      "_hint_title": "Claude Code session a0eb5683-cc98-46cb-8f65-bd6215989f48",
+      "relevant": [
+        {
+          "document_id": "doc_d4fd2b8c72c3d16ac19bdf99c28ca2d2",
+          "gain": 3
+        }
+      ],
+      "scope_project": "worldsimulator"
+    },
+    {
+      "label": "codex-.buzz-21",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f9548-ba90-7373-b839-9b891fef21cf",
+      "relevant": [
+        {
+          "document_id": "doc_3170a0d32db323d22f370367eb67df35",
+          "gain": 3
+        }
+      ],
+      "scope_project": ".buzz"
+    },
+    {
+      "label": "codex-10-46-2026-07-24-behnaz-22",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f94a1-7d6c-7ce3-9a4f-4cec8d43f557",
+      "relevant": [
+        {
+          "document_id": "doc_de64f273d731130b42f84df947729dd2",
+          "gain": 3
+        }
+      ],
+      "scope_project": "10-46-2026-07-24-behnaz"
+    },
+    {
+      "label": "codex-AI Web Analyzer & Fixer-23",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f498b-2a7d-7ca1-b289-fba5185e89f4",
+      "relevant": [
+        {
+          "document_id": "doc_43069564824c61efabda577a7be4b8a8",
+          "gain": 3
+        }
+      ],
+      "scope_project": "AI Web Analyzer & Fixer"
+    },
+    {
+      "label": "codex-CaseForge-Hermes-Bridge-24",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f70dd-84fa-7820-ac26-d2c702c0399c",
+      "relevant": [
+        {
+          "document_id": "doc_346ed455dd04063c4d70c2b71ff674b8",
+          "gain": 3
+        }
+      ],
+      "scope_project": "CaseForge-Hermes-Bridge"
+    },
+    {
+      "label": "codex-FinceptTerminal-25",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019ea5a8-e09d-7a30-89c9-a46bb8d59f12",
+      "relevant": [
+        {
+          "document_id": "doc_cbc9a029dc5dfbddbc1f0448ac69fffa",
+          "gain": 3
+        }
+      ],
+      "scope_project": "FinceptTerminal"
+    },
+    {
+      "label": "codex-FluidVoice-26",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f70b6-1dbc-7182-862c-17f1d1b314d1",
+      "relevant": [
+        {
+          "document_id": "doc_218e67832a282fb637513a9a4dbecfb9",
+          "gain": 3
+        }
+      ],
+      "scope_project": "FluidVoice"
+    },
+    {
+      "label": "codex-Kimi_Agent_AI Legal Case Companion-27",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f70bb-3ad8-7230-836b-7bc2a7b132a6",
+      "relevant": [
+        {
+          "document_id": "doc_13f2b4d36532498c0a5ca7a90461db28",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_AI Legal Case Companion"
+    },
+    {
+      "label": "codex-Kimi_Agent_Forensic Accounting Skill Guide-28",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019e42b6-a835-7161-8fc4-fb39006f3e3c",
+      "relevant": [
+        {
+          "document_id": "doc_ad2c604bd1fbed8533c052647f533c9b",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_Forensic Accounting Skill Guide"
+    },
+    {
+      "label": "codex-Kimi_Agent_Macro Economy Simulation PRD-29",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f7663-045b-7890-a044-eadaa5c4e189",
+      "relevant": [
+        {
+          "document_id": "doc_4c9b3d658d73e6c289c6a67819da5dac",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_Macro Economy Simulation PRD"
+    },
+    {
+      "label": "codex-Kimi_Agent_law-30",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f70f5-1489-78e3-a89d-6d345dd0d340",
+      "relevant": [
+        {
+          "document_id": "doc_5662fa9d4f232f48c68a4b0c93ee47b8",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_law"
+    },
+    {
+      "label": "codex-Kimi_search_AI codex-31",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019e8eae-6b74-72e2-be83-cac847b5a43e",
+      "relevant": [
+        {
+          "document_id": "doc_0ed059c304cb4ada4d7b751d4aca7efd",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_search_AI codex"
+    },
+    {
+      "label": "codex-OSC-32",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f9f48-6fcd-7983-a42d-f2989fc70ed3",
+      "relevant": [
+        {
+          "document_id": "doc_00d9ef937f0c55d75dd1f212e294cd39",
+          "gain": 3
+        }
+      ],
+      "scope_project": "OSC"
+    },
+    {
+      "label": "codex-OSC-origin-33",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019fa525-5764-7ca2-8569-bc38439c75f7",
+      "relevant": [
+        {
+          "document_id": "doc_1de642c18f3e056dae73cf50809c35bf",
+          "gain": 3
+        }
+      ],
+      "scope_project": "OSC-origin"
+    },
+    {
+      "label": "codex-agent-economy-34",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019fa265-240b-7273-835a-86148bbf6918",
+      "relevant": [
+        {
+          "document_id": "doc_b7f67c5d37da27def12957c5e3b7f67f",
+          "gain": 3
+        }
+      ],
+      "scope_project": "agent-economy"
+    },
+    {
+      "label": "codex-ai-visibility-growth-platform-35",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019ef004-f261-7632-bffb-92930586042f",
+      "relevant": [
+        {
+          "document_id": "doc_9261d0172e396e262f2a6f6b7b81951a",
+          "gain": 3
+        }
+      ],
+      "scope_project": "ai-visibility-growth-platform"
+    },
+    {
+      "label": "codex-apex-36",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f15a5-f77c-7420-9f22-32e3e17ef3c8",
+      "relevant": [
+        {
+          "document_id": "doc_49428e59d741ecfde9f38d2f282860ec",
+          "gain": 3
+        }
+      ],
+      "scope_project": "apex"
+    },
+    {
+      "label": "codex-arrio-37",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019ed328-b566-7091-8c18-433fc1e0c88f",
+      "relevant": [
+        {
+          "document_id": "doc_b9519ee80aa619dba047d7c9cf67775e",
+          "gain": 3
+        }
+      ],
+      "scope_project": "arrio"
+    },
+    {
+      "label": "codex-bloom ai-38",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f1578-4335-7410-8feb-db067882264b",
+      "relevant": [
+        {
+          "document_id": "doc_3151545f72c34e7dd2212c41b2258913",
+          "gain": 3
+        }
+      ],
+      "scope_project": "bloom ai"
+    },
+    {
+      "label": "codex-ca-39",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019f018d-92ea-7452-b153-d6938991faed",
+      "relevant": [
+        {
+          "document_id": "doc_b215a8e6479736fb5844b19a3fe13424",
+          "gain": 3
+        }
+      ],
+      "scope_project": "ca"
+    },
+    {
+      "label": "codex-can-we-connect-obsidian-to-codex-40",
+      "source": "codex",
+      "query": "",
+      "_hint_title": "Codex session 019e889f-7419-7ef2-b81f-1547c6d55479",
+      "relevant": [
+        {
+          "document_id": "doc_0c82aa62525f4c2d861d3a90325ce101",
+          "gain": 3
+        }
+      ],
+      "scope_project": "can-we-connect-obsidian-to-codex"
+    },
+    {
+      "label": "grok-AI Web Analyzer & Fixer-41",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f49a2-5532-7fe2-bec1-6a4e62803449",
+      "relevant": [
+        {
+          "document_id": "doc_a6212013415baf64508a545c58becd5c",
+          "gain": 3
+        }
+      ],
+      "scope_project": "AI Web Analyzer & Fixer"
+    },
+    {
+      "label": "grok-FluidVoice-42",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f6406-9e2d-7e33-b865-99ed8c45197b",
+      "relevant": [
+        {
+          "document_id": "doc_cff2c307994134afc6690af80f87ef12",
+          "gain": 3
+        }
+      ],
+      "scope_project": "FluidVoice"
+    },
+    {
+      "label": "grok-Kimi_Agent_Macro Economy Simulation PRD-43",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f77ec-9875-7c01-b456-f4c0cc728e33",
+      "relevant": [
+        {
+          "document_id": "doc_c550896eaef7bf3e459ec12ecccce207",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_Macro Economy Simulation PRD"
+    },
+    {
+      "label": "grok-Microsoft VS Code-44",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f3a63-29e0-74e0-bd73-f34bc2e7d4b0",
+      "relevant": [
+        {
+          "document_id": "doc_a1fa2df25e3e2b798b127c477fefeb14",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Microsoft VS Code"
+    },
+    {
+      "label": "grok-agent-economy-45",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f9beb-d365-7291-b164-479bc2b96b98",
+      "relevant": [
+        {
+          "document_id": "doc_9a3f6ba49e12f89cd63f01c3e1fe4b0d",
+          "gain": 3
+        }
+      ],
+      "scope_project": "agent-economy"
+    },
+    {
+      "label": "grok-caseiq-46",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f58d0-1f0e-74f0-a7fb-84aaf2467baa",
+      "relevant": [
+        {
+          "document_id": "doc_0865c932ee76aa958b6781891dffcb90",
+          "gain": 3
+        }
+      ],
+      "scope_project": "caseiq"
+    },
+    {
+      "label": "grok-grok-47",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019fa451-8fd1-7633-8a30-8dbdf52b0220",
+      "relevant": [
+        {
+          "document_id": "doc_5b333f8fe1fba2cc49d68b9d623d8308",
+          "gain": 3
+        }
+      ],
+      "scope_project": "grok"
+    },
+    {
+      "label": "grok-judgeandjurry-48",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f37f3-8d75-7981-a27a-fc5902be7016",
+      "relevant": [
+        {
+          "document_id": "doc_862a1c8936d117e2ac7586f536922cc2",
+          "gain": 3
+        }
+      ],
+      "scope_project": "judgeandjurry"
+    },
+    {
+      "label": "grok-matri-49",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f9c01-b1fe-7fd1-af3c-3dcf4af5d452",
+      "relevant": [
+        {
+          "document_id": "doc_230b43594aca156cba8e2f4112d74831",
+          "gain": 3
+        }
+      ],
+      "scope_project": "matri"
+    },
+    {
+      "label": "grok-synto-master-50",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f37e8-acb5-7502-946e-7e6d4d6bdce2",
+      "relevant": [
+        {
+          "document_id": "doc_1a2472813ce6713eef9695ad317e175a",
+          "gain": 3
+        }
+      ],
+      "scope_project": "synto-master"
+    },
+    {
+      "label": "hermes-global-51",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Cerebras Memory MCP Access",
+      "relevant": [
+        {
+          "document_id": "doc_eb0cc12013b4ed1e1e266250e15c54f5",
+          "gain": 3
+        }
+      ]
+    },
+    {
+      "label": "hermes-ceribras-memory-52",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Connect Cerebras Memory MCP",
+      "relevant": [
+        {
+          "document_id": "doc_7c44a5edb1f6947ceda7b9c786b95739",
+          "gain": 3
+        }
+      ],
+      "scope_project": "ceribras-memory"
+    },
+    {
+      "label": "hermes-judgeandjurry-codex-v2-53",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260625_235245_19aa0d",
+      "relevant": [
+        {
+          "document_id": "doc_c9352fc57638a2f146d5586b84a3d553",
+          "gain": 3
+        }
+      ],
+      "scope_project": "judgeandjurry-codex-v2"
+    },
+    {
+      "label": "hermes-matri-54",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260707_070042_9b92d6",
+      "relevant": [
+        {
+          "document_id": "doc_0f6d1c31037f704dd05ab189e710c2de",
+          "gain": 3
+        }
+      ],
+      "scope_project": "matri"
+    },
+    {
+      "label": "hermes-simeconomy-55",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Install gstack skill",
+      "relevant": [
+        {
+          "document_id": "doc_1b5f0025a39ea36649e23b035831e8fc",
+          "gain": 3
+        }
+      ],
+      "scope_project": "simeconomy"
+    },
+    {
+      "label": "projects-.agents-56",
+      "source": "projects",
+      "query": "",
+      "_hint_title": ".agents/skills/graphify/SKILL.md",
+      "relevant": [
+        {
+          "document_id": "doc_c508fe4e455366341c83fbfe26c4eef6",
+          "gain": 3
+        }
+      ],
+      "scope_project": ".agents"
+    },
+    {
+      "label": "projects-AI Web Analyzer & Fixer-57",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "AI Web Analyzer & Fixer/AGENTS.md",
+      "relevant": [
+        {
+          "document_id": "doc_62d1fca3c9ab1fadb88f4e0afcbafb58",
+          "gain": 3
+        }
+      ],
+      "scope_project": "AI Web Analyzer & Fixer"
+    },
+    {
+      "label": "projects-CaseForge-Hermes-Bridge-58",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "CaseForge-Hermes-Bridge/app/docs/superpowers/plans/2026-06-17-caseforge-hardening.md",
+      "relevant": [
+        {
+          "document_id": "doc_dbd24ecd0955bac90fa16f30ec15a1cd",
+          "gain": 3
+        }
+      ],
+      "scope_project": "CaseForge-Hermes-Bridge"
+    },
+    {
+      "label": "projects-FluidVoice-59",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "FluidVoice/README.md",
+      "relevant": [
+        {
+          "document_id": "doc_3392bcf268c6f3de817d0431e6875cd9",
+          "gain": 3
+        }
+      ],
+      "scope_project": "FluidVoice"
+    },
+    {
+      "label": "projects-Handy-60",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "Handy/src/content/release-notes/0.9.0.md",
+      "relevant": [
+        {
+          "document_id": "doc_2b05b5feed1156276044551a4ff73511",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Handy"
+    },
+    {
+      "label": "projects-Kimi_Agent_AI Legal Case Companion-61",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "Kimi_Agent_AI Legal Case Companion/docs/architecture.md",
+      "relevant": [
+        {
+          "document_id": "doc_8a97678cde03583b8ae1ce319288ef04",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_AI Legal Case Companion"
+    },
+    {
+      "label": "projects-Kimi_Agent_AI Legal Document Analyzer-62",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "Kimi_Agent_AI Legal Document Analyzer/app/bff/README.md",
+      "relevant": [
+        {
+          "document_id": "doc_ad2767d0fa2f0336569a0ec2edab6221",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_AI Legal Document Analyzer"
+    },
+    {
+      "label": "projects-Kimi_Agent_Macro Economy Simulation PRD-63",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "Kimi_Agent_Macro Economy Simulation PRD/worldsim_prd.agent.final.md",
+      "relevant": [
+        {
+          "document_id": "doc_c2f0bd02d4ffddea24042912e2046f9d",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_Macro Economy Simulation PRD"
+    },
+    {
+      "label": "projects-Kimi_Agent_law-64",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "Kimi_Agent_law/AGENTS.md",
+      "relevant": [
+        {
+          "document_id": "doc_813296c55f6e6ad3bf44f8a957277053",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_law"
+    },
+    {
+      "label": "projects-Kimi_search_AI claude-65",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "Kimi_search_AI claude/AUDIT_IMPLEMENTATION_PLAN.md",
+      "relevant": [
+        {
+          "document_id": "doc_422db60e4f0775bd85da5d7a3e55ddbe",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_search_AI claude"
+    },
+    {
+      "label": "projects-Kimi_search_AI codex-66",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "Kimi_search_AI codex/server/rankai_server.egg-info/SOURCES.txt",
+      "relevant": [
+        {
+          "document_id": "doc_e7ed5414b25050c03963fe66aee15d92",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_search_AI codex"
+    },
+    {
+      "label": "projects-agent-economy-67",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "agent-economy/dashboard/public/THIRD_PARTY_NOTICES.txt",
+      "relevant": [
+        {
+          "document_id": "doc_50b673ef6c0ac9eb785ed852c8dedd97",
+          "gain": 3
+        }
+      ],
+      "scope_project": "agent-economy"
+    },
+    {
+      "label": "projects-agent-os-68",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "agent-os/source/README.md",
+      "relevant": [
+        {
+          "document_id": "doc_0e1dd43a23d1447bbea880b1753fbbc0",
+          "gain": 3
+        }
+      ],
+      "scope_project": "agent-os"
+    },
+    {
+      "label": "projects-ai-visibility-growth-platform-69",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "ai-visibility-growth-platform/AGENTS.md",
+      "relevant": [
+        {
+          "document_id": "doc_111ab7617b67e18acc8d60a82fbf00eb",
+          "gain": 3
+        }
+      ],
+      "scope_project": "ai-visibility-growth-platform"
+    },
+    {
+      "label": "projects-apex-70",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "apex/motionsites-apex/README.md",
+      "relevant": [
+        {
+          "document_id": "doc_6ca5818724bbc25ae3f2e1266bd21106",
+          "gain": 3
+        }
+      ],
+      "scope_project": "apex"
+    },
+    {
+      "label": "projects-caseiq-71",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "caseiq/README.md",
+      "relevant": [
+        {
+          "document_id": "doc_59ee2eb29263f659e955aa0cf3d4f8d1",
+          "gain": 3
+        }
+      ],
+      "scope_project": "caseiq"
+    },
+    {
+      "label": "projects-ceribras-memory-72",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "ceribras-memory/CLAUDE.md",
+      "relevant": [
+        {
+          "document_id": "doc_f3d57839af9f3bdf96d83e7d2d655ca7",
+          "gain": 3
+        }
+      ],
+      "scope_project": "ceribras-memory"
+    },
+    {
+      "label": "projects-dorsa-73",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "dorsa/.vercel/README.txt",
+      "relevant": [
+        {
+          "document_id": "doc_72e023a7e0d414d64b72862ac875b658",
+          "gain": 3
+        }
+      ],
+      "scope_project": "dorsa"
+    },
+    {
+      "label": "projects-dorsa1-74",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "dorsa1/.vercel/README.txt",
+      "relevant": [
+        {
+          "document_id": "doc_be59262450e3a1f6ea26470cbc74e345",
+          "gain": 3
+        }
+      ],
+      "scope_project": "dorsa1"
+    },
+    {
+      "label": "projects-equilibrium-web-75",
+      "source": "projects",
+      "query": "",
+      "_hint_title": "equilibrium-web/README.md",
+      "relevant": [
+        {
+          "document_id": "doc_3f1a33692bf0bef06278ab481f256130",
+          "gain": 3
+        }
+      ],
+      "scope_project": "equilibrium-web"
+    },
+    {
+      "label": "grok-AI Web Analyzer & Fixer-76",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f49ac-9886-7733-a8c2-70d690ce574f",
+      "relevant": [
+        {
+          "document_id": "doc_08c88bae42c40ca608c33378eee6c6ab",
+          "gain": 3
+        }
+      ],
+      "scope_project": "AI Web Analyzer & Fixer"
+    },
+    {
+      "label": "grok-FluidVoice-77",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f649d-66b9-7050-ba18-c8524f2563f6",
+      "relevant": [
+        {
+          "document_id": "doc_8701ee0d8b29d71d221707a01e1840f0",
+          "gain": 3
+        }
+      ],
+      "scope_project": "FluidVoice"
+    },
+    {
+      "label": "grok-Kimi_Agent_Macro Economy Simulation PRD-78",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f77f2-a461-78f2-9386-cddd7f2683b2",
+      "relevant": [
+        {
+          "document_id": "doc_b6d2f52e078b308d4f901526f6046a2f",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_Macro Economy Simulation PRD"
+    },
+    {
+      "label": "grok-agent-economy-79",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f9b20-c96b-7a92-baa8-e261ad6b4f99",
+      "relevant": [
+        {
+          "document_id": "doc_29651775461dab6ee9edf2a3d0a7102b",
+          "gain": 3
+        }
+      ],
+      "scope_project": "agent-economy"
+    },
+    {
+      "label": "grok-caseiq-80",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f57e6-bb1c-7750-ab19-cedc171d37e8",
+      "relevant": [
+        {
+          "document_id": "doc_688e9f324edb8a40336cba4e4e1bb875",
+          "gain": 3
+        }
+      ],
+      "scope_project": "caseiq"
+    },
+    {
+      "label": "grok-grok-81",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019fa0f8-f91c-7b82-a47d-4116e7d5df69",
+      "relevant": [
+        {
+          "document_id": "doc_168e4e159bb7b8be890f7e40cce9474e",
+          "gain": 3
+        }
+      ],
+      "scope_project": "grok"
+    },
+    {
+      "label": "grok-judgeandjurry-82",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f37f9-9848-7a50-b2b2-fbe42bba0e02",
+      "relevant": [
+        {
+          "document_id": "doc_fa92db8c6f4369b3da05c7256b19ccaf",
+          "gain": 3
+        }
+      ],
+      "scope_project": "judgeandjurry"
+    },
+    {
+      "label": "hermes-global-83",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Preparing for Turkish Airlines Discovery #2",
+      "relevant": [
+        {
+          "document_id": "doc_266cc8c6d2b412201bb539de42f12dbd",
+          "gain": 3
+        }
+      ]
+    },
+    {
+      "label": "hermes-judgeandjurry-codex-v2-84",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260625_215308_193c01",
+      "relevant": [
+        {
+          "document_id": "doc_8e3e2673d33c8c400b9af6437d328927",
+          "gain": 3
+        }
+      ],
+      "scope_project": "judgeandjurry-codex-v2"
+    },
+    {
+      "label": "hermes-matri-85",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260706_231802_3a3fa7",
+      "relevant": [
+        {
+          "document_id": "doc_c4445a4e6d88953c60eb7eded05c8a4b",
+          "gain": 3
+        }
+      ],
+      "scope_project": "matri"
+    },
+    {
+      "label": "hermes-simeconomy-86",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Setting Up AI Economy Simulator",
+      "relevant": [
+        {
+          "document_id": "doc_9e9d92d668ee0029d51bd3c2d5c8f710",
+          "gain": 3
+        }
+      ],
+      "scope_project": "simeconomy"
+    },
+    {
+      "label": "grok-AI Web Analyzer & Fixer-87",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f49aa-d589-78f2-bde5-2860ed9fcdf8",
+      "relevant": [
+        {
+          "document_id": "doc_ce9850280069e0298f5f07051b037278",
+          "gain": 3
+        }
+      ],
+      "scope_project": "AI Web Analyzer & Fixer"
+    },
+    {
+      "label": "grok-FluidVoice-88",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f649b-ef0e-7d11-9d16-1e3ef8ee5d37",
+      "relevant": [
+        {
+          "document_id": "doc_f01106ae77d95e01cbd38acd8102c5da",
+          "gain": 3
+        }
+      ],
+      "scope_project": "FluidVoice"
+    },
+    {
+      "label": "grok-Kimi_Agent_Macro Economy Simulation PRD-89",
+      "source": "grok",
+      "query": "",
+      "_hint_title": "Grok session 019f77f2-a461-78f2-9386-cdcf9b65e332",
+      "relevant": [
+        {
+          "document_id": "doc_cd57e77e1c2b5497586e5b7e7e152fda",
+          "gain": 3
+        }
+      ],
+      "scope_project": "Kimi_Agent_Macro Economy Simulation PRD"
+    },
+    {
+      "label": "hermes-global-90",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Preparing for Turkish Airlines Discovery",
+      "relevant": [
+        {
+          "document_id": "doc_be1cbc6307fa0a770152bacc803d3730",
+          "gain": 3
+        }
+      ]
+    },
+    {
+      "label": "hermes-matri-91",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260706_192132_e7c736",
+      "relevant": [
+        {
+          "document_id": "doc_065f971b1a463ba7249b561b865bf58b",
+          "gain": 3
+        }
+      ],
+      "scope_project": "matri"
+    },
+    {
+      "label": "hermes-global-92",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Ponytail skill install",
+      "relevant": [
+        {
+          "document_id": "doc_848bc0a0e63c9ffc00572f2298f7a1ea",
+          "gain": 3
+        }
+      ]
+    },
+    {
+      "label": "hermes-matri-93",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260706_192017_1a1842",
+      "relevant": [
+        {
+          "document_id": "doc_0f67e8589d826694e1e3101cae6512b0",
+          "gain": 3
+        }
+      ],
+      "scope_project": "matri"
+    },
+    {
+      "label": "hermes-global-94",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260707_051007_1f1fbb",
+      "relevant": [
+        {
+          "document_id": "doc_12b821f2d5e31d05963a4f86ff7874fe",
+          "gain": 3
+        }
+      ]
+    },
+    {
+      "label": "hermes-matri-95",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260706_153713_f6b12d",
+      "relevant": [
+        {
+          "document_id": "doc_98a6cb32bd37eed337c609b771387758",
+          "gain": 3
+        }
+      ],
+      "scope_project": "matri"
+    },
+    {
+      "label": "hermes-global-96",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260707_034138_225018",
+      "relevant": [
+        {
+          "document_id": "doc_97bcf67fdda9278fe70e7c5d281deea1",
+          "gain": 3
+        }
+      ]
+    },
+    {
+      "label": "hermes-matri-97",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260706_153321_ac875a",
+      "relevant": [
+        {
+          "document_id": "doc_de3ccf7db757c045c77ff886a140ca57",
+          "gain": 3
+        }
+      ],
+      "scope_project": "matri"
+    },
+    {
+      "label": "hermes-global-98",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Checking the current AI model #3",
+      "relevant": [
+        {
+          "document_id": "doc_2edd7e7dd41a5b691d995469fa1538f6",
+          "gain": 3
+        }
+      ]
+    },
+    {
+      "label": "hermes-matri-99",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "How to defend our court case",
+      "relevant": [
+        {
+          "document_id": "doc_261e66cc0011966a88868b1ae216b582",
+          "gain": 3
+        }
+      ],
+      "scope_project": "matri"
+    },
+    {
+      "label": "hermes-global-100",
+      "source": "hermes",
+      "query": "",
+      "_hint_title": "Hermes session 20260706_215300_1da639",
+      "relevant": [
+        {
+          "document_id": "doc_eac54d7a6b2678d09a7c11154fc1c5b6",
+          "gain": 3
+        }
+      ]
+    }
+  ]
+}

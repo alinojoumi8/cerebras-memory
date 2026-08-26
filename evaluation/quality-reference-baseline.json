@@ -1,0 +1,21 @@
+{
+  "cases": 24,
+  "distillation_channel": "enabled",
+  "floors": {
+    "mrr_at_8": 0.78,
+    "ndcg_at_10": 0.83,
+    "recall_at_20": 1.0,
+    "recall_at_8": 1.0
+  },
+  "floors_note": "Absolute minimums, checked alongside the relative comparison. A purely relative gate permits an unbounded downward ratchet: MRR@8 drifted 0.890278 (pilot, 2026-07-21) -> 0.789931 (full) -> 0.786458 -> 0.758681 across a month, each decline absorbed by re-recording this file from a failing run. The floors are seeded at the 2026-07-29T08:36:04Z reference, which the metrics below no longer meet -- deliberately, so the absorbed regression is visible until it is investigated.",
+  "label_set": "C:\\Users\\matri\\Documents\\cerebras memory\\ceribras-memory\\evaluation\\search-quality-baseline.json",
+  "label_set_sha256": "497a2c351cca24adac3ad2765a615b5b00ad8d7287230dde9fbe82312e56ee0f",
+  "metrics": {
+    "mrr_at_8": 0.758681,
+    "ndcg_at_10": 0.817753,
+    "recall_at_20": 1.0,
+    "recall_at_8": 1.0
+  },
+  "recorded_at": "2026-07-29T19:32:57Z",
+  "warm_p95_latency_ms": 1347.507
+}
