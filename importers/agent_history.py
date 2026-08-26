@@ -278,22 +278,42 @@ def _dedupe_documents(documents: Iterable[IngestDocument]) -> list[IngestDocumen
     return list(selected.values())
 
 
-def _jsonl_files(roots: Iterable[Path], name: str = "*.jsonl") -> tuple[list[Path], bool]:
-    existing = [root for root in roots if root.exists() and root.is_dir()]
-    if not existing:
-        return [], False
+def _jsonl_files(
+    roots: Iterable[Path], name: str = "*.jsonl"
+) -> tuple[list[Path], str | None]:
+    """Return matching files, plus a reason when the roots cannot be trusted.
+
+    A scan is only trustworthy if *every* declared root was readable. Reporting
+    availability as "at least one root existed" meant a source whose second root
+    had gone away -- a stopped sync, an absent machine, an unmounted drive --
+    still reported success, just with fewer keys. ``reconcile_source`` treats
+    keys absent from a successful scan as deletions, so the missing machine's
+    documents were removed along with their chunks, distillations and
+    provenance receipts, and the ``reconcile_min_ratio`` floor only trips once
+    more than half a source is gone.
+
+    Failing the scan instead turns silent data loss into a loud, recoverable
+    error: ``ingest.py`` skips reconciliation entirely for a failed source.
+    """
+
+    declared = list(roots)
+    if not declared:
+        return [], "no history root is configured"
+    missing = [root for root in declared if not (root.exists() and root.is_dir())]
+    if missing:
+        return [], "history root unavailable: " + ", ".join(str(root) for root in missing)
     files: set[Path] = set()
-    for root in existing:
+    for root in declared:
         files.update(path for path in root.rglob(name) if path.is_file() and not path.is_symlink())
-    return sorted(files), True
+    return sorted(files), None
 
 
 def scan_claude(settings: Settings, cutoff: datetime) -> ScanResult:
     result = ScanResult(source="claude")
-    files, available = _jsonl_files(settings.claude_roots)
-    if not available:
+    files, unavailable = _jsonl_files(settings.claude_roots)
+    if unavailable:
         result.successful = False
-        result.error = "Claude history root is unavailable"
+        result.error = f"Claude {unavailable}"
         return result
     documents: list[IngestDocument] = []
     try:
@@ -341,10 +361,10 @@ def scan_claude(settings: Settings, cutoff: datetime) -> ScanResult:
 
 def scan_codex(settings: Settings, cutoff: datetime) -> ScanResult:
     result = ScanResult(source="codex")
-    files, available = _jsonl_files(settings.codex_roots)
-    if not available:
+    files, unavailable = _jsonl_files(settings.codex_roots)
+    if unavailable:
         result.successful = False
-        result.error = "Codex history roots are unavailable"
+        result.error = f"Codex {unavailable}"
         return result
     documents: list[IngestDocument] = []
     try:
@@ -393,10 +413,10 @@ def scan_codex(settings: Settings, cutoff: datetime) -> ScanResult:
 
 def scan_grok(settings: Settings, cutoff: datetime) -> ScanResult:
     result = ScanResult(source="grok")
-    files, available = _jsonl_files(settings.grok_roots, "updates.jsonl")
-    if not available:
+    files, unavailable = _jsonl_files(settings.grok_roots, "updates.jsonl")
+    if unavailable:
         result.successful = False
-        result.error = "Grok history roots are unavailable"
+        result.error = f"Grok {unavailable}"
         return result
     documents: list[IngestDocument] = []
     try:
