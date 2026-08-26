@@ -17,7 +17,9 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.json"
 DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
-_ALLOWED_SECRET_ENV_KEYS = frozenset({"DEEPSEEK_API_KEY", "NVIDIA_API_KEY"})
+_ALLOWED_SECRET_ENV_KEYS = frozenset(
+    {"DEEPSEEK_API_KEY", "NVIDIA_API_KEY", "CEREBRAS_MEMORY_HTTP_TOKENS"}
+)
 
 
 @dataclass(frozen=True)
@@ -126,8 +128,17 @@ def _deep_update(target: dict[str, Any], override: dict[str, Any]) -> dict[str, 
 
 
 def _load_secret_env(path: Path = DEFAULT_ENV_PATH) -> None:
-    """Load only explicitly allowed API keys without overriding the process env."""
+    """Load only explicitly allowed API keys without overriding the process env.
 
+    ``CEREBRAS_MEMORY_NO_SECRETS`` skips the file entirely. The network listener
+    sets it: distillation runs from ``ingest.py`` and ``kb.py``, never from a
+    serving path, so the one process reachable from other machines has no reason
+    to hold an outbound API credential. Withholding it means a compromised
+    listener cannot make an outbound call at all.
+    """
+
+    if os.environ.get("CEREBRAS_MEMORY_NO_SECRETS") == "1":
+        return
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8").splitlines():

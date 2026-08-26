@@ -46,7 +46,7 @@ from runlock import distillation_lock
 from vector_index import UsearchVectorIndex, VectorIndexUnavailable
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 class ReconcileFloorNotMet(RuntimeError):
     """A scan returned implausibly few keys, so deletion was refused."""
@@ -886,6 +886,46 @@ class KnowledgeStore:
                     except Exception:
                         connection.rollback()
                         raise
+                if current < 6:
+                    # Who reached the knowledge base over the network, and what
+                    # they asked for in the abstract -- never what they asked.
+                    #
+                    # Same discipline as outbound_distillation_audit: identifiers,
+                    # hashes, counts, decisions, status and error codes only. The
+                    # query is recorded as a hash so repeated searches remain
+                    # correlatable without the audit becoming a second, unredacted
+                    # copy of everything anyone ever looked for. No snippets, no
+                    # tokens; client_label and token_fingerprint identify the
+                    # caller so one machine's access can be reviewed or revoked.
+                    connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+                    CREATE TABLE IF NOT EXISTS access_audit (
+                        audit_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                        client_label TEXT NOT NULL,
+                        token_fingerprint TEXT NOT NULL,
+                        transport TEXT NOT NULL,
+                        tool TEXT NOT NULL,
+                        query_hash TEXT,
+                        result_count INTEGER,
+                        applied_project TEXT,
+                        scope_origin TEXT,
+                        latency_ms REAL,
+                        status TEXT NOT NULL,
+                        error_code TEXT,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_access_audit_client
+                        ON access_audit(client_label, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_access_audit_status
+                        ON access_audit(status, created_at);
+
+                    INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+                    PRAGMA user_version = 6;
+                    COMMIT;
+                    """
+                    )
                 # Early v2 builds aggregated retry state at document level.
                 # This additive, idempotent repair gives existing v2 databases
                 # the required per-unit pending/failed state without changing
