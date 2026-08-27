@@ -55,28 +55,47 @@ Branch `feat/remote-access`, off `kb-upgrade-phases-0-4`. Suite: **184 passed**
 | 2 Scope | done | `NO_PROCESS_CWD` sentinel plus leaf-name matching reported as `client_root_leaf`. Local STDIO behaviour unchanged; the canary suite still asserts `client_root`. |
 | 3 Reconcile guard | done | `_jsonl_files` names the missing roots and fails the scan. A contrast test proves this was not guarding a no-op: with a root present but emptied, a 1-in-5 loss reconciles through silently. |
 | 4 HTTP hub | done | `http_server.py`, schema v6 `access_audit`, scoped bearer tokens, DNS-rebinding protection, loopback-only bind, refusal to start inside `projects_root`. Verified end to end against the live 4,310-document corpus. |
-| 5 Spokes | **blocked** | Tailscale 1.102.3 installed and signed in; this node is `matrix.taila13ed8.ts.net`, MagicDNS on. `tailscale serve` is **not enabled for the tailnet** and must be enabled from the Tailscale admin console before the hub can be published. No second machine is online to register yet. |
+| 5 Spokes | hub published | `tailscale serve` is live: `https://matrix.taila13ed8.ts.net/` proxies to the loopback listener, tailnet only, valid TLS. Verified end to end against the live corpus. `Register-CerebrasMemory.ps1 -Remote` is written and its guards tested. Nothing left but to run it on a second machine, and none is online yet. |
 | 6 Per-host ingest | done | Remote roots keyed `session:{host}:{id}`; this machine stays unqualified so nothing is re-keyed. Hermes stays local-only. |
 | 7 Documentation | done | `CLAUDE.md` invariant rewritten and bounded; `SECURITY.md` network-exposure section; `README.md` remote-access and multi-machine ingestion sections. |
 | 8 REST surface | not started | Optional. Only needed if a CI agent cannot speak MCP. |
 | 9 Offline fallback | not started | Optional, deliberately deferred. |
 
-### To finish Phase 5
+### Verified live (2026-08-27)
 
-1. Enable Serve for the tailnet in the Tailscale admin console.
-2. Start the hub, then publish it:
+Over `https://matrix.taila13ed8.ts.net/mcp`, against the real 4,310-document
+corpus: no token 401, wrong token 401, read-only token attempting a write 403,
+`/healthz` 200 without a credential. A memory was saved from a network client,
+searched back, and paged. `scope.origin` was never `process_cwd`. Every call is
+in `access_audit`, including the rejections -- an absent credential fingerprints
+as `none` and a wrong one fingerprints distinctly, so one token retried is
+separable from many guesses.
+
+### What is left
+
+1. Run the spoke registration on a second machine once one is online:
 
 ```
-.venv/Scripts/python.exe http_server.py --allowed-host matrix.taila13ed8.ts.net
-tailscale serve --bg --https=443 http://127.0.0.1:8791
+$env:CEREBRAS_MEMORY_HTTP_TOKEN = "<the spoke secret from .env>"
+.\scripts\Register-CerebrasMemory.ps1 -Remote -HubUrl https://matrix.taila13ed8.ts.net/mcp
 ```
 
-3. Tokens already exist in the ignored `.env` as `CEREBRAS_MEMORY_HTTP_TOKENS`:
-   client `spoke` with scope `rw`, client `ci` with scope `ro`.
-4. Register the spoke against `https://matrix.taila13ed8.ts.net/mcp` with an
-   `Authorization: Bearer` header, using `scripts/Register-CerebrasMemory.ps1`
-   extended with a `-Remote` mode (not yet written).
-5. Restore the `CerebrasMemoryRefresh` scheduled task, which is still missing.
+2. Set up Syncthing for that machine's agent history and add its root to
+   `agent_roots` as `{ "host": "<name>", "path": "..." }`.
+3. Start the hub automatically. It currently runs only when started by hand;
+   register it as a boot task with `-LogonType S4U` so it survives a reboot and
+   does not need an interactive logon.
+4. Optional phases 8 and 9 remain unstarted.
+
+### Operational notes
+
+- Tokens live in the ignored `.env` as `CEREBRAS_MEMORY_HTTP_TOKENS`: client
+  `spoke` with scope `rw`, client `ci` with scope `ro`.
+- `CerebrasMemoryRefresh` has been restored and runs daily at 03:00.
+- `distillation.mode` was set to `off` so the first catch-up refresh brings the
+  corpus current without sending four weeks of backlog to DeepSeek. Turn it back
+  on once that run has been seen to succeed. The previous config is at
+  `backups/pre-remote-access-20260826/config.json.bak`.
 
 ### Deviations from the plan as approved
 
