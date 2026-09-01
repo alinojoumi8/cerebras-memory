@@ -142,20 +142,25 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
             elif args.distill_command == "evaluate":
-                _print(store.evaluate_distillations(limit=args.limit))
+                evaluation = store.evaluate_distillations(limit=args.limit)
+                _print(evaluation)
+                # Surface the verdict in the exit code so the command can gate.
+                if not evaluation.get("automated_gate_passed", True):
+                    return 1
         elif args.command == "canary":
             if args.canary_command == "status":
                 _print(store.canary_status())
             elif args.canary_command == "run":
                 from quality import evaluate_canary_suite
 
-                _print(
-                    evaluate_canary_suite(
-                        store,
-                        args.suite or store.settings.canary_suite_path,
-                        record=True,
-                    )
+                canary = evaluate_canary_suite(
+                    store,
+                    args.suite or store.settings.canary_suite_path,
+                    record=True,
                 )
+                _print(canary)
+                if not canary.get("gate_passed"):
+                    return 1
         return 0
     except (ValueError, PermissionError, RuntimeError) as exc:
         _print({"error": str(exc)})

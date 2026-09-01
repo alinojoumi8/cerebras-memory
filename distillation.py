@@ -36,6 +36,49 @@ _NO_RESPONSE_CLAIM = re.compile(
 _HEADER = re.compile(r"(?m)^(USER|ASSISTANT) \[([^\]\r\n]+)\]\n")
 
 
+def _read_with_deadline(request: Request, timeout: float, *, label: str) -> bytes:
+    """Read a response body under an absolute wall-clock deadline.
+
+    ``urlopen(timeout=...)`` bounds each individual socket operation, not the
+    exchange as a whole, so a peer that returns headers promptly and then drips
+    the body can run far past the configured budget. Closing the response from a
+    timer enforces the documented boundary for real.
+
+    The Ollama path always did this; the DeepSeek path did not, which mattered
+    more there because a single unit can issue three requests and four units run
+    concurrently.
+    """
+
+    deadline = time.monotonic() + timeout
+    expired = threading.Event()
+    with urlopen(request, timeout=timeout) as response:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"{label} request exceeded the absolute deadline")
+
+        def expire() -> None:
+            expired.set()
+            response.close()
+
+        timer = threading.Timer(remaining, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            try:
+                body = response.read()
+            except (OSError, ValueError) as exc:
+                if expired.is_set():
+                    raise TimeoutError(
+                        f"{label} request exceeded the absolute deadline"
+                    ) from exc
+                raise
+        finally:
+            timer.cancel()
+    if expired.is_set() or time.monotonic() > deadline:
+        raise TimeoutError(f"{label} request exceeded the absolute deadline")
+    return body
+
+
 class DistillationUnavailable(RuntimeError):
     pass
 
@@ -339,40 +382,12 @@ class OllamaDistiller:
             method="POST",
         )
         try:
-            timeout = self.settings.timeout_seconds
-            deadline = time.monotonic() + timeout
-            with urlopen(request, timeout=timeout) as response:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("Ollama request exceeded the absolute deadline")
-                # urllib's timeout applies to individual socket operations.
-                # Ollama may send response headers before a long non-streaming
-                # body, so close the response at the absolute wall-clock
-                # deadline as well. This preserves the documented 120-second
-                # fail-open boundary even for slowly advancing connections.
-                deadline_reached = threading.Event()
-
-                def expire() -> None:
-                    deadline_reached.set()
-                    response.close()
-
-                timer = threading.Timer(remaining, expire)
-                timer.daemon = True
-                timer.start()
-                try:
-                    try:
-                        body = response.read()
-                    except (OSError, ValueError) as exc:
-                        if deadline_reached.is_set():
-                            raise TimeoutError(
-                                "Ollama request exceeded the absolute deadline"
-                            ) from exc
-                        raise
-                finally:
-                    timer.cancel()
-                if deadline_reached.is_set() or time.monotonic() > deadline:
-                    raise TimeoutError("Ollama request exceeded the absolute deadline")
-                raw = json.loads(body.decode("utf-8"))
+            body = _read_with_deadline(
+                request,
+                self.settings.timeout_seconds,
+                label="Ollama",
+            )
+            raw = json.loads(body.decode("utf-8"))
             content = raw.get("message", {}).get("content")
             if not isinstance(content, str):
                 raise DistillationInvalid("Ollama response did not contain message content")
@@ -590,9 +605,13 @@ class DeepSeekDistiller:
             invalid: DistillationInvalid | None = None
             for _attempt in range(2):
                 request = self._request(text)
-                timeout = self.settings.timeout_seconds
-                with urlopen(request, timeout=timeout) as response:
-                    raw = json.loads(response.read().decode("utf-8"))
+                raw = json.loads(
+                    _read_with_deadline(
+                        request,
+                        self.settings.timeout_seconds,
+                        label="DeepSeek",
+                    ).decode("utf-8")
+                )
                 try:
                     result = self._validate_role_grounding(
                         self._decode_response(raw),
@@ -607,9 +626,13 @@ class DeepSeekDistiller:
             # bounded final fallback; the same exact local validator remains
             # authoritative.
             request = self._request(text, json_mode=True)
-            timeout = self.settings.timeout_seconds
-            with urlopen(request, timeout=timeout) as response:
-                raw = json.loads(response.read().decode("utf-8"))
+            raw = json.loads(
+                _read_with_deadline(
+                    request,
+                    self.settings.timeout_seconds,
+                    label="DeepSeek",
+                ).decode("utf-8")
+            )
             try:
                 result = self._validate_role_grounding(
                     self._decode_response(raw),

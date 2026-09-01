@@ -65,11 +65,31 @@ def _evaluate_case(
     *,
     default_limit: int,
     default_latency_ms: float,
+    default_rank_tolerance: int,
 ) -> tuple[dict[str, Any], float]:
     case_id = str(case["id"])
     query = redact_text(str(case["query"])).strip()
     limit = min(max(1, int(case.get("limit", default_limit))), 20)
+    # ``scope_project`` resolves against the configured projects root so a suite
+    # is portable across machines; ``scope_path`` stays supported for absolute
+    # paths that live outside that root.
+    #
+    # Resolving through a path (rather than passing ``project=``) is deliberate:
+    # it exercises the client-root inference MCP clients actually use, which is
+    # why these cases assert ``origin: client_root``.  But it only works when the
+    # name is a real directory.  A project label taken from a session ``cwd``
+    # has none -- 19 of the 51 distinct values in evaluation/label-template.json
+    # are of that kind -- and ``_project_for_path`` then returns None, silently
+    # downgrading the case to an unscoped global search that still reports
+    # ``passed`` while testing nothing.  Fail loudly instead.
     scope_path = case.get("scope_path")
+    scope_failures: list[str] = []
+    if not scope_path and case.get("scope_project"):
+        candidate = store.settings.projects_root / str(case["scope_project"])
+        if candidate.is_dir():
+            scope_path = candidate
+        else:
+            scope_failures.append("scope_project_not_a_directory")
     roots = [Path(str(scope_path))] if scope_path else None
     started = time.perf_counter()
     response = store.search_response(
@@ -86,13 +106,15 @@ def _evaluate_case(
     latency_ms = (time.perf_counter() - started) * 1000.0
     results = response["results"]
     document_ids = [str(item["document_id"]) for item in results]
-    failures: list[str] = []
+    failures: list[str] = list(scope_failures)
 
     expected_empty = bool(case.get("expected_empty", False))
     if expected_empty and results:
         failures.append("expected_empty")
     expected_document_id = case.get("expected_document_id")
     expected_rank: int | None = None
+    baseline_rank: int | None = None
+    rank_delta: int | None = None
     if expected_document_id:
         expected = str(expected_document_id)
         expected_rank = next(
@@ -101,6 +123,16 @@ def _evaluate_case(
         )
         if expected_rank is None:
             failures.append("expected_document_missing")
+        else:
+            # Presence alone is not quality: a case that used to rank 1 and now
+            # ranks 8 is a regression the old gate reported as "passed".
+            recorded = case.get("baseline_rank")
+            if recorded is not None:
+                baseline_rank = int(recorded)
+                rank_delta = expected_rank - baseline_rank
+                tolerance = int(case.get("rank_tolerance", default_rank_tolerance))
+                if rank_delta > tolerance:
+                    failures.append("rank_regression")
 
     forbidden_ids = {str(value) for value in case.get("forbidden_document_ids", [])}
     if forbidden_ids.intersection(document_ids):
@@ -145,6 +177,8 @@ def _evaluate_case(
             "failures": failures,
             "result_count": len(results),
             "expected_rank": expected_rank,
+            "baseline_rank": baseline_rank,
+            "rank_delta": rank_delta,
             "scope": response["scope"],
             "latency_ms": round(latency_ms, 3),
             "score_stage": (
@@ -170,6 +204,7 @@ def evaluate_canary_suite(
             store.settings.canary_latency_threshold_ms,
         )
     )
+    default_rank_tolerance = max(0, int(defaults.get("rank_tolerance", 2)))
     cases: list[dict[str, Any]] = suite["cases"]
     started_at = _iso_now()
 
@@ -195,6 +230,7 @@ def evaluate_canary_suite(
                 case,
                 default_limit=default_limit,
                 default_latency_ms=default_latency_ms,
+                default_rank_tolerance=default_rank_tolerance,
             )
         except Exception as exc:
             report = {
@@ -203,6 +239,8 @@ def evaluate_canary_suite(
                 "failures": [f"exception:{type(exc).__name__}"],
                 "result_count": 0,
                 "expected_rank": None,
+                "baseline_rank": None,
+                "rank_delta": None,
                 "scope": None,
                 "latency_ms": 0.0,
                 "score_stage": None,

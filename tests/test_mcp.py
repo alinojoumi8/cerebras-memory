@@ -108,7 +108,7 @@ def test_stdio_server_tools_annotations_calls_and_cross_process_visibility(tmp_p
                 ].startswith("rcpt_")
                 stats = await session.call_tool("kb_stats", {})
                 assert stats.structuredContent["documents"] == 2
-                assert stats.structuredContent["schema_version"] == 3
+                assert stats.structuredContent["schema_version"] == 5
 
     asyncio.run(exercise())
 

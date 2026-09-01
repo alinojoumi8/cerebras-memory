@@ -6,12 +6,17 @@ only as an explicit test hook so integration tests never need network access.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import hashlib
 from pathlib import Path
 import re
 from typing import Iterable, Protocol
 
 import numpy as np
+
+# Bounded so a long-lived STDIO worker cannot accumulate query vectors without
+# limit; large enough that paging through one result set never re-embeds.
+_QUERY_CACHE_SIZE = 256
 
 
 class Embedder(Protocol):
@@ -30,21 +35,37 @@ def _normalize(vector: np.ndarray) -> np.ndarray:
 
 
 class FastEmbedder:
-    def __init__(self, model_name: str, dimensions: int, cache_dir: Path):
+    def __init__(
+        self,
+        model_name: str,
+        dimensions: int,
+        cache_dir: Path,
+        query_prefix: str = "",
+        threads: int = 2,
+    ):
         self.model_name = model_name
         self.dimensions = dimensions
         self.cache_dir = Path(cache_dir)
+        self.query_prefix = query_prefix
+        self.threads = max(1, int(threads))
         self._model = None
+        self._query_cache: OrderedDict[str, np.ndarray] = OrderedDict()
 
     def _load(self):
         if self._model is None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             from fastembed import TextEmbedding
 
+            # Thread count is a caller decision, not a constant. Serving keeps a
+            # small cap because every desktop client spawns its own STDIO worker
+            # and none may reserve the machine; a batch ingest is the only
+            # process running and should use the box. Hardcoding the serving cap
+            # here previously left a full re-index on a 32-core machine running
+            # at 2 threads.
             self._model = TextEmbedding(
                 model_name=self.model_name,
                 cache_dir=str(self.cache_dir),
-                threads=max(1, min(2, __import__("os").cpu_count() or 1)),
+                threads=self.threads,
                 lazy_load=True,
             )
         return self._model
@@ -81,11 +102,34 @@ class FastEmbedder:
         # arena growth seen with FastEmbed's default batch of 256 on Windows.
         return self._embed_values(values, batch_size=64, parallel=None)
 
+    def _cache_query(self, text: str, vector: np.ndarray) -> np.ndarray:
+        """Remember a query vector, bounded by simple FIFO eviction.
+
+        Repeated and paginated searches otherwise pay a fresh ONNX forward pass
+        every time. Callers treat vectors as read-only, so returning the cached
+        array is safe.
+        """
+
+        self._query_cache[text] = vector
+        while len(self._query_cache) > _QUERY_CACHE_SIZE:
+            self._query_cache.pop(next(iter(self._query_cache)))
+        return vector
+
     def embed_query(self, text: str) -> np.ndarray:
-        vectors = [_normalize(vector) for vector in self._load().query_embed([text])]
+        cached = self._query_cache.get(text)
+        if cached is not None:
+            return cached
+        # FastEmbed's ``query_embed`` does not apply a model-specific retrieval
+        # instruction: ``OnnxTextEmbedding`` never overrides it, so the base
+        # implementation just calls ``embed``. Asymmetric models such as BGE are
+        # trained with a query-side prefix, and omitting it encodes queries on
+        # the passage-side manifold. Documents are correctly left unprefixed, so
+        # applying it here needs no re-embedding.
+        prepared = f"{self.query_prefix}{text}" if self.query_prefix else text
+        vectors = [_normalize(vector) for vector in self._load().query_embed([prepared])]
         if len(vectors) != 1 or vectors[0].shape != (self.dimensions,):
             raise ValueError(f"Unexpected query embedding shape for {self.model_name}")
-        return vectors[0]
+        return self._cache_query(text, vectors[0])
 
     def embed_for_ingestion(self, texts: Iterable[str]) -> list[np.ndarray]:
         """Embed offline refreshes in one bounded ONNX process.
@@ -100,7 +144,10 @@ class FastEmbedder:
         values = list(texts)
         if not values:
             return []
-        return self._embed_values(values, batch_size=16, parallel=None)
+        # Measured on a 32-core box at 16 ingest threads: batch 16 -> 18.5 vec/s,
+        # batch 64 -> 19.0, batch 256 -> 17.5. 64 is the peak and matches the
+        # serving path, so both use one bounded size.
+        return self._embed_values(values, batch_size=64, parallel=None)
 
 
 class HashingEmbedder:

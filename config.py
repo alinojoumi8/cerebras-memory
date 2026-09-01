@@ -77,6 +77,7 @@ class Settings:
     model_cache_dir: Path
     embedding_model: str
     embedding_dimensions: int
+    embedding_query_prefix: str
     projects_root: Path
     transcript_days: int
     chunk_size: int
@@ -84,6 +85,10 @@ class Settings:
     candidate_limit: int
     rrf_k: int
     max_file_bytes: int
+    reconcile_min_ratio: float
+    embedding_threads: int
+    ingest_embedding_threads: int
+    ingest_batch_documents: int
     enabled_sources: frozenset[str]
     claude_roots: tuple[Path, ...]
     codex_roots: tuple[Path, ...]
@@ -140,6 +145,50 @@ def _load_secret_env(path: Path = DEFAULT_ENV_PATH) -> None:
             os.environ.setdefault(key, value)
 
 
+# Retrieval instruction prefixes for asymmetric embedding models, applied to the
+# query side only; the document side is trained without them.
+#
+# BGE v1.5 maps to "" deliberately, and this has now been measured twice.
+# Before heading breadcrumbs: the documented instruction
+# ("Represent this sentence for searching relevant passages: ") lifted MRR@8 from
+# 0.7604 to 0.7708 but dropped recall@8 from 1.0 to 0.9583, pushing a relevant
+# document out of the top 8. After breadcrumbs, it was worse on every axis -
+# MRR@8 0.7583 against 0.7865 with the prefix off, recall@8 again 0.9583.
+# BGE v1.5's release notes describe the instruction as optional for this
+# generation, and the corpus agrees. Set `embedding_query_prefix` explicitly in
+# config.json to override.
+_QUERY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("bge", ""),
+    ("e5", "query: "),
+    ("gte", ""),
+)
+
+
+def _query_prefix(configured: Any, model_name: str) -> str:
+    """Resolve the query-side instruction prefix.
+
+    An explicit configuration value always wins, including the empty string,
+    so a symmetric model can turn the prefix off. ``None`` derives it from the
+    model family.
+    """
+
+    if configured is not None:
+        return str(configured)
+    lowered = model_name.casefold()
+    for marker, prefix in _QUERY_PREFIXES:
+        if marker in lowered:
+            return prefix
+    return ""
+
+
+def _thread_count(configured: Any, *, default: int) -> int:
+    """Resolve an ONNX thread count, clamped to the machine."""
+
+    cores = os.cpu_count() or 1
+    value = default if configured is None else int(configured)
+    return max(1, min(cores, value))
+
+
 def _defaults() -> dict[str, Any]:
     user_profile = Path(os.environ.get("USERPROFILE", str(Path.home())))
     codex_home = Path(os.environ.get("CODEX_HOME", user_profile / ".codex"))
@@ -148,6 +197,11 @@ def _defaults() -> dict[str, Any]:
         "model_cache_dir": "data/models",
         "embedding_model": "BAAI/bge-small-en-v1.5",
         "embedding_dimensions": 384,
+        # null = derive from the model. BGE v1.5 is trained with an asymmetric
+        # query instruction; FastEmbed does not apply it (OnnxTextEmbedding does
+        # not override query_embed), so queries would otherwise be encoded on the
+        # passage-side manifold. Set to "" to disable for a symmetric model.
+        "embedding_query_prefix": None,
         "projects_root": str(user_profile / "Documents" / "myprojects"),
         "transcript_days": 90,
         "chunk_size": 1800,
@@ -155,6 +209,22 @@ def _defaults() -> dict[str, Any]:
         "candidate_limit": 50,
         "rrf_k": 60,
         "max_file_bytes": 1_048_576,
+        # A scan reporting fewer than this fraction of the already-indexed
+        # documents for a source is treated as broken rather than as mass
+        # deletion. Set to 0 to disable the guard.
+        "reconcile_min_ratio": 0.5,
+        # ONNX intra-op threads while *serving*. Every desktop client spawns
+        # its own STDIO worker, so this stays small on purpose: several idle
+        # clients must not each reserve the machine.
+        "embedding_threads": 2,
+        # ONNX intra-op threads while *ingesting*. A batch refresh is the only
+        # process running, so the serving cap is exactly wrong there: it left a
+        # 32-core machine running a full re-index on 2 cores. null = half the
+        # cores.
+        "ingest_embedding_threads": None,
+        # Documents embedded and committed per batch. Bounds memory and makes
+        # an interrupted rebuild resumable instead of losing the whole source.
+        "ingest_batch_documents": 250,
         "sources": {
             "hermes": True,
             "claude": True,
@@ -296,13 +366,28 @@ def load_settings(path: str | Path | None = None) -> Settings:
         model_cache_dir=_expand_path(raw["model_cache_dir"], base=PROJECT_ROOT),
         embedding_model=str(raw["embedding_model"]),
         embedding_dimensions=int(raw["embedding_dimensions"]),
+        embedding_query_prefix=_query_prefix(
+            raw.get("embedding_query_prefix"),
+            str(raw["embedding_model"]),
+        ),
+        ingest_batch_documents=max(1, int(raw["ingest_batch_documents"])),
         projects_root=_expand_path(raw["projects_root"], base=PROJECT_ROOT),
         transcript_days=max(1, int(raw["transcript_days"])),
         chunk_size=max(400, int(raw["chunk_size"])),
         chunk_overlap=max(0, int(raw["chunk_overlap"])),
-        candidate_limit=max(10, int(raw["candidate_limit"])),
+        # Upper bound as well as lower: the candidate stage feeds an unbounded
+        # linear vector scan and a rerank pass, so a large value buys nothing
+        # the document stage (20 anchors) can use while making every search
+        # slower.
+        candidate_limit=min(200, max(10, int(raw["candidate_limit"]))),
         rrf_k=max(1, int(raw["rrf_k"])),
         max_file_bytes=max(1024, int(raw["max_file_bytes"])),
+        reconcile_min_ratio=min(1.0, max(0.0, float(raw["reconcile_min_ratio"]))),
+        embedding_threads=_thread_count(raw.get("embedding_threads"), default=2),
+        ingest_embedding_threads=_thread_count(
+            raw.get("ingest_embedding_threads"),
+            default=max(2, (os.cpu_count() or 2) // 2),
+        ),
         enabled_sources=enabled_sources,
         claude_roots=tuple(_expand_path(p, base=PROJECT_ROOT) for p in roots.get("claude", [])),
         codex_roots=tuple(_expand_path(p, base=PROJECT_ROOT) for p in roots.get("codex", [])),

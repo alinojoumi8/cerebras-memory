@@ -324,6 +324,11 @@ def scan_claude(settings: Settings, cutoff: datetime) -> ScanResult:
             if document:
                 documents.append(document)
             else:
+                # The session exists on disk but produced no fresh document,
+                # almost always because every message aged out of the rolling
+                # window. Retaining the key keeps reconciliation from deleting
+                # knowledge that is still on disk and will never be rebuilt.
+                result.retained_keys.add(f"session:{session_id}")
                 result.skipped += 1
     except (OSError, UnicodeError) as exc:
         result.successful = False
@@ -371,6 +376,11 @@ def scan_codex(settings: Settings, cutoff: datetime) -> ScanResult:
             if document:
                 documents.append(document)
             else:
+                # The session exists on disk but produced no fresh document,
+                # almost always because every message aged out of the rolling
+                # window. Retaining the key keeps reconciliation from deleting
+                # knowledge that is still on disk and will never be rebuilt.
+                result.retained_keys.add(f"session:{session_id}")
                 result.skipped += 1
     except (OSError, UnicodeError) as exc:
         result.successful = False
@@ -415,6 +425,11 @@ def scan_grok(settings: Settings, cutoff: datetime) -> ScanResult:
             if document:
                 documents.append(document)
             else:
+                # The session exists on disk but produced no fresh document,
+                # almost always because every message aged out of the rolling
+                # window. Retaining the key keeps reconciliation from deleting
+                # knowledge that is still on disk and will never be rebuilt.
+                result.retained_keys.add(f"session:{session_id}")
                 result.skipped += 1
     except (OSError, UnicodeError) as exc:
         result.successful = False
@@ -497,6 +512,8 @@ def scan_hermes(settings: Settings, cutoff: datetime) -> ScanResult:
         if document:
             documents.append(document)
         else:
+            # Same reasoning as the file-based scanners above.
+            result.retained_keys.add(f"session:{session_id}")
             result.skipped += 1
     result.documents = _dedupe_documents(documents)
     result.watermark = _iso(max((doc.timestamp for doc in result.documents), default=cutoff))

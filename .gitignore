@@ -11,3 +11,7 @@ logs/
 backups/
 .pytest_cache/
 .test-tmp/
+
+# Tooling artifacts (codebase-memory index, graphify output)
+.codebase-memory/
+graphify-out/

@@ -22,6 +22,7 @@ def main() -> None:
         settings.embedding_model,
         settings.embedding_dimensions,
         settings.model_cache_dir,
+        threads=settings.ingest_embedding_threads,
     )
     base = "Local retrieval benchmark paragraph with implementation facts and citations. " * 24
     texts = [f"{base}{index}" for index in range(max(1, args.count))]

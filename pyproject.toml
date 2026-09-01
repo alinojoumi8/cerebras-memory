@@ -9,6 +9,10 @@ dependencies = [
     "flashrank==0.2.10",
     "mcp[cli]==1.28.1",
     "numpy==1.26.4",
+    # Imported directly by reranking.py to build the ONNX session options.
+    # It previously arrived only transitively via fastembed/flashrank, which is
+    # fragile for a project that pins everything else exactly.
+    "onnxruntime==1.27.0",
     "usearch==2.26.0",
 ]
 
@@ -20,6 +24,29 @@ dev = [
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".venv", "data", "backups", ".test-tmp"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+ignore = [
+    # store.py carries long explanatory comments on non-obvious decisions;
+    # wrapping them tighter would cost more than it gains.
+    "E501",
+]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["*.py", "importers", "scripts"]
+exclude = "(^\\.venv|^data|^backups|^\\.test-tmp)"
+ignore_missing_imports = true
+# The codebase is not fully annotated yet; this keeps mypy useful without
+# turning every run into a wall of noise.
+check_untyped_defs = true
+warn_unused_ignores = true
 
 [tool.uv]
 package = false
