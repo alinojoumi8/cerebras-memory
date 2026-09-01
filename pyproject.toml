@@ -22,7 +22,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = "-ra --basetemp=.test-tmp/pytest"
 testpaths = ["tests"]
 
 [tool.ruff]
