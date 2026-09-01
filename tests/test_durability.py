@@ -128,4 +128,4 @@ def test_policy_blocked_units_are_terminal_not_pending(settings_factory):
             "SELECT sql FROM sqlite_master WHERE name = 'distillation_unit_state'"
         ).fetchone()[0]
     assert "policy_blocked" in statuses
-    assert store.schema_version() == 5
+    assert store.schema_version() == 6

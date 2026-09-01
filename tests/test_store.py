@@ -36,7 +36,7 @@ def _doc(
 
 
 def test_schema_version_wal_foreign_keys_and_transactional_replacement(store):
-    assert store.schema_version() == 5
+    assert store.schema_version() == 6
     first = store.upsert_document(_doc("one", "alpha " * 300))
     before = store.get_document(first.document_id, limit=50)
     assert before and before["pagination"]["total_chunks"] > 1
@@ -51,8 +51,8 @@ def test_schema_version_wal_foreign_keys_and_transactional_replacement(store):
 
     with sqlite3.connect(store.database_path) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].casefold() == "wal"
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 5
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 6
         assert connection.execute(
             """
             SELECT COUNT(*) FROM provenance_receipts
@@ -210,7 +210,7 @@ def test_v1_to_v3_migration_preserves_documents_chunks_and_citations(settings_fa
 
     migrated = KnowledgeStore(settings, HashingEmbedder(32))
     after = migrated.get_document(written.document_id)
-    assert migrated.schema_version() == 5
+    assert migrated.schema_version() == 6
     assert after is not None
     assert after["document"]["document_id"] == before["document"]["document_id"]
     assert [chunk["chunk_id"] for chunk in after["chunks"]] == [

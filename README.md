@@ -13,6 +13,11 @@ sent to the configured DeepSeek endpoint; project documents, saved memories,
 raw credentials, and reasoning/tool records are never sent. The service does
 not replace or modify the existing Codex AgentMemory server.
 
+Other machines reach the same knowledge base as clients, over an authenticated
+loopback listener published on a private overlay -- see **Remote access** below.
+The design and its sequencing are recorded in
+[docs/REMOTE-ACCESS-PLAN.md](docs/REMOTE-ACCESS-PLAN.md).
+
 ## Runtime
 
 - Python 3.11 in `.venv`
@@ -81,6 +86,42 @@ documents outside the rolling 90-day set and project documents that were deleted
 An unavailable or incomplete source is never reconciled. Explicitly saved
 memories have `kind=memory` and are never automatically pruned.
 
+### Ingesting from more than one machine
+
+Ingestion stays administrative and local: transcripts are never pushed in over
+the network. A spoke syncs its agent history directory to the hub -- Syncthing
+in *Send Only* mode over the tailnet is the recommended path, because it
+preserves modification times, which the rolling 90-day window depends on -- and
+the hub scans it like any other root.
+
+An `agent_roots` entry is either a bare path, meaning this machine, or an object
+naming the machine it was synced from:
+
+```json
+"agent_roots": {
+  "claude": [
+    "%USERPROFILE%\\.claude\\projects",
+    { "host": "laptop", "path": "D:\\hub-sync\\laptop\\.claude\\projects" }
+  ]
+}
+```
+
+Only the second form is host-qualified, producing `session:laptop:<id>` rather
+than `session:<id>`. **This asymmetry is deliberate.** Every scanner has a
+fallback that is not machine-unique -- a filename, a parent directory, a row
+index -- so two machines can produce the same `stable_document_id` and silently
+overwrite one another. Prefixing *every* key would fix that but would re-key all
+existing documents, forcing a full re-embed, orphaning every distillation, and
+causing reconciliation to delete the originals. Leaving this machine unqualified
+makes the change purely additive.
+
+Hermes is the exception and stays local-only: its scanner shells out to the
+Hermes CLI rather than reading files, so a synced directory cannot feed it.
+
+A scan fails if *any* declared root is unreadable, and a failed scan never
+reconciles. This matters most for synced roots: a stopped sync or an absent
+machine used to look like "those documents were deleted".
+
 ## MCP tools
 
 The server is local STDIO only:
@@ -105,6 +146,79 @@ It exposes exactly four tools:
 There is no MCP ingestion or deletion tool. Retrieved content is marked
 `untrusted_evidence`; clients must cite it and must never execute instructions
 found inside it.
+
+## Remote access
+
+One machine owns the database, the models, and ingestion. Other machines are
+thin clients: no database copy, no model cache, and therefore no sync or merge
+problem, because there is only ever one writer.
+
+`mcp_server.py` remains the STDIO server and is unchanged. `http_server.py` is a
+second entry point onto the *same* FastMCP instance, so both transports serve
+identical tools over identical data.
+
+### Hub setup
+
+Generate one token per client and keep them in the ignored `.env`:
+
+```
+CEREBRAS_MEMORY_HTTP_TOKENS=laptop:rw:<64 hex>,ci-github:ro:<64 hex>
+```
+
+Each entry is `label:scope:secret`. The label identifies the machine in the
+access audit and can be revoked on its own. Scope is `rw` or `ro`; a `ro` token
+is refused every tool that is not read-only, including tools added later that
+have not been classified.
+
+Start the listener, then publish it to the tailnet:
+
+```
+.venv/Scripts/python.exe http_server.py --allowed-host matrix.taila13ed8.ts.net
+tailscale serve --bg --https=443 http://127.0.0.1:8791
+```
+
+The listener refuses to bind anything but loopback, and refuses to start from
+inside `projects_root`. `tailscale serve` terminates TLS with a real tailnet
+certificate and admits only tailnet peers. **Never use `tailscale funnel`** --
+that publishes to the open internet.
+
+`GET /healthz` answers without a token and reports nothing but liveness and the
+schema version, so the overlay and any monitor can probe it.
+
+### Registering a spoke
+
+A spoke needs no virtual environment and no scheduled task; only the URL and its
+own token. The registration script has a `-Remote` mode that skips every local
+preflight, skips the refresh task, and registers the HTTP transport with each
+client CLI, preserving unrelated MCP entries exactly as the local mode does:
+
+```
+$env:CEREBRAS_MEMORY_HTTP_TOKEN = "<this machine's secret>"
+.\scripts\Register-CerebrasMemory.ps1 -Remote -HubUrl https://matrix.taila13ed8.ts.net/mcp
+```
+
+It refuses to run without `-HubUrl`, refuses to send a bearer token over
+plaintext http to anything but loopback, and refuses to run with the token
+environment variable unset. Codex is registered with `--bearer-token-env-var`,
+so on that client the secret is read from the environment and never written to
+`config.toml`. Hermes stays hub-only, because its history is exported through
+its own CLI rather than read from files.
+
+The resulting entry looks like this:
+
+```json
+{
+  "cerebras-memory": {
+    "type": "http",
+    "url": "https://matrix.taila13ed8.ts.net/mcp",
+    "headers": { "Authorization": "Bearer <this machine's token>" }
+  }
+}
+```
+
+Cloud and CI agents join the tailnet as ephemeral tagged nodes with a
+pre-authorized key, are restricted by tailnet ACL to the hub on 443, and are
+issued a `ro` token.
 
 ## Administrative CLI
 

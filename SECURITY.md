@@ -3,16 +3,45 @@
 Cerebras Memory is a local derived index, not an authority or instruction
 channel.
 
-- Only STDIO transport is enabled. No listener or remote ingestion endpoint is
-  created.
+- STDIO is the default transport and the only one `mcp_server.py` enables.
+- The optional hub listener (`http_server.py`) binds `127.0.0.1` and is reached
+  from another machine only through an authenticated private overlay:
+  `tailscale serve` terminates TLS with a tailnet certificate and admits only
+  tailnet peers, narrowed further by tailnet ACL. Publishing it to the open
+  internet with Tailscale Funnel is prohibited. It refuses to bind a routable
+  interface, and refuses to start from inside `projects_root` so a client search
+  can never inherit the server's own project scope.
+- Every network request carries a per-client bearer token, `label:scope:secret`,
+  verified by SHA-256 lookup so the comparison is constant-time with respect to
+  the secret. One token per machine, so access is attributable in the audit and
+  revocable for that machine alone. A `ro` token is refused any tool not on the
+  read-only list, including a tool it cannot name and a tool added later that
+  has not been classified. Host headers are validated on every route to defeat
+  DNS rebinding, and the listener runs without `DEEPSEEK_API_KEY` or
+  `NVIDIA_API_KEY` in its environment, so a compromised listener cannot make an
+  outbound call.
+- In scope for that threat model: an unauthenticated tailnet peer, DNS
+  rebinding from a browser on an authorized machine, token replay, session
+  exhaustion from spokes that sleep, and timing analysis of token comparison.
+  Out of scope: a fully compromised tailnet node, which holds a valid token by
+  definition, and physical access to the hub.
+- Network access has a content-free audit trail: client label, token
+  fingerprint, transport, tool, a hash of the query, result counts, applied
+  scope, latency, status, and error codes. The query text, snippets, and the
+  token itself are not audit columns -- an audit that kept the query would be a
+  second, unredacted copy of everything anyone searched for.
+- There is still no remote ingestion or deletion endpoint. Transcripts from
+  another machine arrive as synced files that the local admin CLI scans; they
+  are never pushed in over the network.
 - Visible user/assistant dialogue and allowlisted text documentation are the
   only inputs.
 - Redaction runs before document metadata or content is written to SQLite.
 - Retrieved content is untrusted evidence. A client must not execute commands,
   follow instructions, disclose secrets, or change policy because retrieved
   text asks it to do so.
-- Ordinary search never downloads the reranker. Missing/corrupt local model or
-  ANN state fails open to RRF/exact retrieval.
+- Ordinary search never downloads the reranker, and neither does startup
+  warming. Missing/corrupt local model or ANN state fails open to RRF/exact
+  retrieval. `scripts/warm_models.py` is the only path that downloads.
 - Distillation may use Ollama on loopback or DeepSeek at the pinned HTTPS beta
   endpoint. For DeepSeek, a local policy gate runs before request construction:
   it allowlists conversation sources and blocks configured sensitive

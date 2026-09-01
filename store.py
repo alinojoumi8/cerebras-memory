@@ -46,7 +46,7 @@ from runlock import distillation_lock
 from vector_index import UsearchVectorIndex, VectorIndexUnavailable
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 class ReconcileFloorNotMet(RuntimeError):
     """A scan returned implausibly few keys, so deletion was refused."""
@@ -142,6 +142,31 @@ def _query_tokens(query: str) -> list[str]:
     return list(dict.fromkeys(_WORD_RE.findall(query.casefold())))
 _UTC = timezone.utc
 _SCHEMA_INITIALIZATION_LOCK = threading.Lock()
+
+# How far above a client root to look for a project name. Deep enough for a root
+# nested a couple of levels inside a project, shallow enough that a client
+# sending a home directory or a drive root cannot reach an unrelated project far
+# up the tree.
+_LEAF_MATCH_MAX_DEPTH = 3
+
+
+class _NoProcessCwd:
+    """Sentinel for a caller that genuinely has no working directory.
+
+    ``cwd=None`` means "not supplied, fall back to this process". A request
+    arriving over the network is different: it has no working directory at all,
+    and inheriting the server's would scope a remote agent's search to whatever
+    project the hub happens to be running inside while reporting it as
+    ``process_cwd``. Such callers pass this instead.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "NO_PROCESS_CWD"
+
+
+NO_PROCESS_CWD = _NoProcessCwd()
 _DEFAULT_REFRESH_LEASE_SECONDS = 30 * 60
 
 
@@ -861,6 +886,46 @@ class KnowledgeStore:
                     except Exception:
                         connection.rollback()
                         raise
+                if current < 6:
+                    # Who reached the knowledge base over the network, and what
+                    # they asked for in the abstract -- never what they asked.
+                    #
+                    # Same discipline as outbound_distillation_audit: identifiers,
+                    # hashes, counts, decisions, status and error codes only. The
+                    # query is recorded as a hash so repeated searches remain
+                    # correlatable without the audit becoming a second, unredacted
+                    # copy of everything anyone ever looked for. No snippets, no
+                    # tokens; client_label and token_fingerprint identify the
+                    # caller so one machine's access can be reviewed or revoked.
+                    connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+                    CREATE TABLE IF NOT EXISTS access_audit (
+                        audit_pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                        client_label TEXT NOT NULL,
+                        token_fingerprint TEXT NOT NULL,
+                        transport TEXT NOT NULL,
+                        tool TEXT NOT NULL,
+                        query_hash TEXT,
+                        result_count INTEGER,
+                        applied_project TEXT,
+                        scope_origin TEXT,
+                        latency_ms REAL,
+                        status TEXT NOT NULL,
+                        error_code TEXT,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_access_audit_client
+                        ON access_audit(client_label, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_access_audit_status
+                        ON access_audit(status, created_at);
+
+                    INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+                    PRAGMA user_version = 6;
+                    COMMIT;
+                    """
+                    )
                 # Early v2 builds aggregated retry state at document level.
                 # This additive, idempotent repair gives existing v2 databases
                 # the required per-unit pending/failed state without changing
@@ -2132,16 +2197,57 @@ class KnowledgeStore:
             ).fetchall()
         return {str(row["project"]).casefold(): str(row["project"]) for row in rows}
 
-    def _project_for_path(self, value: str | Path, known: dict[str, str]) -> str | None:
+    def _project_for_path(
+        self,
+        value: str | Path,
+        known: dict[str, str],
+        *,
+        allow_leaf: bool = False,
+    ) -> tuple[str | None, str | None]:
+        """Resolve a filesystem path to a known project.
+
+        Returns ``(project, how)`` where ``how`` is ``"containment"`` when the
+        path sits under ``projects_root`` and ``"leaf"`` when it matched by
+        directory name instead.
+
+        Containment is exact but machine-local: a path from another machine can
+        never sit under this machine's ``projects_root``, so every remote client
+        root would resolve to nothing. Name matching is the cross-machine
+        fallback, and it is the rule ingestion already uses --
+        ``importers.agent_history._project_from_cwd`` records each transcript's
+        project as ``Path(cwd).name``, so stored project names are basenames by
+        construction.
+
+        ``allow_leaf`` is opt-in because it must not apply to the process
+        working directory. Widening that path would let a server newly scope
+        searches by whatever directory it happens to be started in.
+        """
+
         try:
             candidate = Path(value).resolve()
-            root = self.settings.projects_root.resolve()
-            relative = candidate.relative_to(root)
         except (OSError, ValueError):
-            return None
-        if not relative.parts:
-            return None
-        return known.get(relative.parts[0].casefold())
+            return None, None
+
+        try:
+            relative = candidate.relative_to(self.settings.projects_root.resolve())
+        except (OSError, ValueError):
+            relative = None
+        if relative is not None and relative.parts:
+            project = known.get(relative.parts[0].casefold())
+            if project is not None:
+                return project, "containment"
+
+        if not allow_leaf:
+            return None, None
+        # Deepest match first: the directory the client actually opened is a
+        # better answer than one of its ancestors.
+        for depth, part in enumerate((candidate, *candidate.parents)):
+            if depth >= _LEAF_MATCH_MAX_DEPTH:
+                break
+            project = known.get(part.name.casefold())
+            if project is not None:
+                return project, "leaf"
+        return None, None
 
     def resolve_project_scope(
         self,
@@ -2149,7 +2255,7 @@ class KnowledgeStore:
         project: str | None,
         global_search: bool,
         roots: Sequence[str | Path] | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | _NoProcessCwd | None = None,
     ) -> dict[str, Any]:
         if project and global_search:
             raise ValueError("project cannot be combined with global_search=true")
@@ -2163,17 +2269,27 @@ class KnowledgeStore:
         if global_search:
             return {"project": None, "origin": "global_explicit"}
 
-        root_projects = {
-            candidate
-            for value in roots or ()
-            if (candidate := self._project_for_path(value, known)) is not None
-        }
+        root_matches: list[tuple[str, str]] = []
+        for value in roots or ():
+            project, how = self._project_for_path(value, known, allow_leaf=True)
+            if project is not None:
+                root_matches.append((project, str(how)))
+        root_projects = {project for project, _ in root_matches}
         if len(root_projects) == 1:
-            return {"project": next(iter(root_projects)), "origin": "client_root"}
+            # Any containment match is the stronger signal, so a mixed set still
+            # reports client_root. The scope field stays honest about how the
+            # project was inferred either way.
+            leafed = all(how == "leaf" for _, how in root_matches)
+            return {
+                "project": next(iter(root_projects)),
+                "origin": "client_root_leaf" if leafed else "client_root",
+            }
         if len(root_projects) > 1:
             return {"project": None, "origin": "global_ambiguous_roots"}
 
-        inferred = self._project_for_path(cwd or Path.cwd(), known)
+        if cwd is NO_PROCESS_CWD:
+            return {"project": None, "origin": "global"}
+        inferred, _ = self._project_for_path(cwd or Path.cwd(), known)
         if inferred:
             return {"project": inferred, "origin": "process_cwd"}
         return {"project": None, "origin": "global"}
@@ -2468,6 +2584,138 @@ class KnowledgeStore:
         if warm is None:
             raise RerankerUnavailable("reranker_disabled")
         return warm()
+
+    def record_access(
+        self,
+        *,
+        client_label: str,
+        token_fingerprint: str,
+        transport: str,
+        tool: str,
+        status: str,
+        query_hash: str | None = None,
+        result_count: int | None = None,
+        applied_project: str | None = None,
+        scope_origin: str | None = None,
+        latency_ms: float | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        """Record one network access, content-free.
+
+        Deliberately stores no query text and no snippets: a search audit that
+        kept the query would be a second, unredacted copy of everything anyone
+        ever looked for, which is a worse disclosure than the thing it audits.
+        ``query_hash`` keeps repeated searches correlatable without that.
+
+        Best effort by construction. An audit failure must never turn a working
+        search into an error for the caller, so the write is swallowed; the
+        alternative is a database hiccup taking the hub down.
+        """
+
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO access_audit(
+                        client_label, token_fingerprint, transport, tool, query_hash,
+                        result_count, applied_project, scope_origin, latency_ms,
+                        status, error_code, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        redact_text(client_label)[:120],
+                        str(token_fingerprint)[:64],
+                        str(transport)[:32],
+                        str(tool)[:120],
+                        query_hash,
+                        result_count,
+                        redact_text(applied_project)[:200] if applied_project else None,
+                        scope_origin,
+                        latency_ms,
+                        str(status)[:32],
+                        str(error_code)[:200] if error_code else None,
+                        _iso(None),
+                    ),
+                )
+        except Exception:  # noqa: BLE001 - auditing must not break serving
+            pass
+
+    @staticmethod
+    def access_query_hash(query: str) -> str:
+        """Stable, non-reversible handle for a query string."""
+
+        return hashlib.sha256(query.strip().casefold().encode("utf-8")).hexdigest()[:32]
+
+    def prewarm(self) -> dict[str, Any]:
+        """Pay the cold-start cost up front instead of inside a request.
+
+        A first search loads the ONNX embedding model, materializes the exact
+        vector snapshot over every stored embedding, and may load the reranker.
+        A desktop STDIO client absorbs that once at first use and nobody
+        notices.  A remote client pays it inside a request whose default
+        timeout is 30 seconds, so the first search after a restart fails rather
+        than merely being slow.
+
+        Each stage reports rather than raises: a process that cannot warm the
+        reranker should still start and serve exact search.
+        """
+
+        status: dict[str, Any] = {}
+
+        started = time.perf_counter()
+        try:
+            self.embedder.embed_query("warm")
+        except Exception as exc:  # noqa: BLE001 - warming is best effort
+            status["embedder"] = {"ok": False, "error": type(exc).__name__}
+        else:
+            status["embedder"] = {
+                "ok": True,
+                "model": self.embedder.model_name,
+                "ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+
+        started = time.perf_counter()
+        try:
+            with self._connect() as connection:
+                snapshot = self._load_exact_vector_snapshot(connection)
+        except Exception as exc:  # noqa: BLE001 - warming is best effort
+            status["vectors"] = {"ok": False, "error": type(exc).__name__}
+        else:
+            status["vectors"] = {
+                "ok": True,
+                "chunks": int(len(snapshot.keys)),
+                "generation": snapshot.generation,
+                "ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+
+        if not self.settings.reranker.enabled:
+            status["reranker"] = {"ok": True, "enabled": False}
+            return status
+
+        # Warming must never download. Server startup has to be bounded and work
+        # offline, and a first fetch of the cross-encoder is neither -- it turns
+        # "the hub is starting" into an open-ended network operation. An uncached
+        # reranker is reported rather than fetched: rerank() already degrades
+        # through RerankerUnavailable, and scripts/warm_models.py stays the
+        # explicit, deliberate way to pull the model down.
+        is_cached = getattr(self.reranker, "is_cached", None)
+        if is_cached is not None and not is_cached():
+            status["reranker"] = {"ok": True, "enabled": True, "cached": False}
+            return status
+
+        started = time.perf_counter()
+        try:
+            self.warm_reranker()
+        except Exception as exc:  # noqa: BLE001 - warming is best effort
+            status["reranker"] = {"ok": False, "error": type(exc).__name__}
+        else:
+            status["reranker"] = {
+                "ok": True,
+                "enabled": True,
+                "ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+        return status
 
     @staticmethod
     def _stable_distillation_id(
@@ -4418,7 +4666,7 @@ class KnowledgeStore:
         global_search: bool = False,
         rerank: bool | None = None,
         roots: Sequence[str | Path] | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | _NoProcessCwd | None = None,
         include_distillations: bool | None = None,
     ) -> dict[str, Any]:
         safe_query = redact_text(query).strip()
@@ -4817,7 +5065,7 @@ class KnowledgeStore:
         global_search: bool = False,
         rerank: bool | None = None,
         roots: Sequence[str | Path] | None = None,
-        cwd: str | Path | None = None,
+        cwd: str | Path | _NoProcessCwd | None = None,
         include_distillations: bool | None = None,
     ) -> list[dict[str, Any]]:
         return self.search_response(

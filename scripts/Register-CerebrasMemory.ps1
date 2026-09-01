@@ -2,7 +2,14 @@
 param(
     [switch]$SkipClients,
     [switch]$SkipTask,
-    [switch]$NoRestartChatGPT
+    [switch]$NoRestartChatGPT,
+    # Register this machine as a spoke against a hub reached over the tailnet,
+    # rather than as the machine that owns the database. A spoke has no virtual
+    # environment, no models and no database, and never ingests, so every local
+    # preflight and the refresh task are skipped.
+    [switch]$Remote,
+    [string]$HubUrl,
+    [string]$TokenEnvVar = 'CEREBRAS_MEMORY_HTTP_TOKEN'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,27 +23,47 @@ $taskName = 'CerebrasMemoryRefresh'
 $serverName = 'cerebras-memory'
 $profilePath = [Environment]::GetFolderPath('UserProfile')
 
-if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
-    throw "Dedicated Python environment is missing: $pythonExe"
-}
-if (-not (Test-Path -LiteralPath $serverScript -PathType Leaf)) {
-    throw "MCP server is missing: $serverScript"
-}
-if (-not (Test-Path -LiteralPath $modelWarmup -PathType Leaf)) {
-    throw "Model warm-up helper is missing: $modelWarmup"
-}
+$hubToken = $null
 
-# Validate imports before touching any client configuration.
-& $pythonExe -c "import mcp_server; assert mcp_server.mcp.name == 'cerebras-memory'"
-if ($LASTEXITCODE -ne 0) {
-    throw 'The MCP server failed its import check.'
-}
+if ($Remote) {
+    if (-not $HubUrl) {
+        throw 'Remote registration needs -HubUrl, for example https://matrix.taila13ed8.ts.net/mcp'
+    }
+    # Loopback is allowed so the hub itself can be exercised before it is
+    # published; anything else must be TLS, because a bearer token is about to
+    # travel over it.
+    if ($HubUrl -notmatch '^https://' -and $HubUrl -notmatch '^http://(127\.0\.0\.1|localhost)(:|/)') {
+        throw "Refusing to send a bearer token over $HubUrl; use https."
+    }
+    $hubToken = [Environment]::GetEnvironmentVariable($TokenEnvVar)
+    if (-not $hubToken) {
+        throw "No token found in $TokenEnvVar. Set it to this machine's secret from the hub's CEREBRAS_MEMORY_HTTP_TOKENS entry (the secret only, not label:scope:secret)."
+    }
+    # A spoke never ingests, so there is nothing to schedule.
+    $SkipTask = $true
+} else {
+    if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
+        throw "Dedicated Python environment is missing: $pythonExe"
+    }
+    if (-not (Test-Path -LiteralPath $serverScript -PathType Leaf)) {
+        throw "MCP server is missing: $serverScript"
+    }
+    if (-not (Test-Path -LiteralPath $modelWarmup -PathType Leaf)) {
+        throw "Model warm-up helper is missing: $modelWarmup"
+    }
 
-# Ordinary searches are deliberately offline-only. Installation is the one
-# explicit point at which the optional cross-encoder may be downloaded.
-& $pythonExe $modelWarmup
-if ($LASTEXITCODE -ne 0) {
-    throw 'The local reranker failed to download or load during warm-up.'
+    # Validate imports before touching any client configuration.
+    & $pythonExe -c "import mcp_server; assert mcp_server.mcp.name == 'cerebras-memory'"
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The MCP server failed its import check.'
+    }
+
+    # Ordinary searches are deliberately offline-only. Installation is the one
+    # explicit point at which the optional cross-encoder may be downloaded.
+    & $pythonExe $modelWarmup
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The local reranker failed to download or load during warm-up.'
+    }
 }
 
 $backupRoot = Join-Path $projectRoot ('backups\registration-{0}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -127,38 +154,69 @@ if (-not $SkipClients) {
     Backup-Configuration -Source (Join-Path $profilePath '.codex\config.toml') -Label 'codex-config.toml'
     Backup-Configuration -Source (Join-Path $profilePath '.grok\config.toml') -Label 'grok-config.toml'
 
+    $authHeader = if ($Remote) { "Authorization: Bearer $hubToken" } else { $null }
+
     if ($PSCmdlet.ShouldProcess('Hermes Agent user MCP configuration', "register $serverName")) {
-        if (Test-Entry -Program 'hermes' -Arguments @('mcp', 'list')) {
-            Remove-HermesServer
+        if ($Remote) {
+            # Hermes stays hub-only: its history is exported through its own CLI
+            # rather than read from files, so a spoke has nothing to contribute
+            # and no verified remote-transport flags to register with.
+            Write-Verbose 'Skipping Hermes on a spoke; it is registered on the hub only.'
+        } else {
+            if (Test-Entry -Program 'hermes' -Arguments @('mcp', 'list')) {
+                Remove-HermesServer
+            }
+            Add-HermesServer -Arguments @(
+                'mcp', 'add', $serverName, '--command', $pythonExe, '--args', $serverScript
+            )
         }
-        Add-HermesServer -Arguments @(
-            'mcp', 'add', $serverName, '--command', $pythonExe, '--args', $serverScript
-        )
     }
 
     if ($PSCmdlet.ShouldProcess('Claude Code user MCP configuration', "register $serverName")) {
         if (Test-Entry -Program 'claude' -Arguments @('mcp', 'list')) {
             Invoke-Checked -Program 'claude' -Arguments @('mcp', 'remove', '--scope', 'user', $serverName)
         }
-        Invoke-Checked -Program 'claude' -Arguments @(
-            'mcp', 'add', '--scope', 'user', $serverName, '--', $pythonExe, $serverScript
-        )
+        if ($Remote) {
+            Invoke-Checked -Program 'claude' -Arguments @(
+                'mcp', 'add', '--scope', 'user', '--transport', 'http', $serverName, $HubUrl,
+                '--header', $authHeader
+            )
+        } else {
+            Invoke-Checked -Program 'claude' -Arguments @(
+                'mcp', 'add', '--scope', 'user', $serverName, '--', $pythonExe, $serverScript
+            )
+        }
     }
 
     if ($PSCmdlet.ShouldProcess('Codex and ChatGPT desktop MCP configuration', "register $serverName")) {
-        Set-CodexServerBlock `
-            -ConfigPath (Join-Path $profilePath '.codex\config.toml') `
-            -PythonPath $pythonExe `
-            -ServerPath $serverScript
+        if ($Remote) {
+            # Codex can read the token from the environment instead of storing
+            # it, so the secret never lands in config.toml. Prefer that.
+            Invoke-Checked -Program 'codex' -Arguments @(
+                'mcp', 'add', $serverName, '--url', $HubUrl, '--bearer-token-env-var', $TokenEnvVar
+            )
+        } else {
+            Set-CodexServerBlock `
+                -ConfigPath (Join-Path $profilePath '.codex\config.toml') `
+                -PythonPath $pythonExe `
+                -ServerPath $serverScript
+        }
     }
 
     if ($PSCmdlet.ShouldProcess('Grok user MCP configuration', "register $serverName")) {
         if (Test-Entry -Program 'grok' -Arguments @('mcp', 'list')) {
             Invoke-Checked -Program 'grok' -Arguments @('mcp', 'remove', '--scope', 'user', $serverName)
         }
-        Invoke-Checked -Program 'grok' -Arguments @(
-            'mcp', 'add', '--scope', 'user', $serverName, '--', $pythonExe, $serverScript
-        )
+        if ($Remote) {
+            Invoke-Checked -Program 'grok' -Arguments @(
+                'mcp', 'add', '--scope', 'user', '--transport', 'http', $serverName, $HubUrl,
+                '--header', $authHeader
+            )
+        } else {
+            Invoke-Checked -Program 'grok' -Arguments @(
+                'mcp', 'add', '--scope', 'user', $serverName, '--', $pythonExe, $serverScript
+            )
+        }
     }
 }
 
@@ -209,10 +267,22 @@ if (-not $SkipClients -and -not $NoRestartChatGPT) {
     }
 }
 
-[pscustomobject]@{
-    Server = $serverName
-    Python = $pythonExe
-    ServerScript = $serverScript
-    BackupDirectory = if (Test-Path -LiteralPath $backupRoot) { $backupRoot } else { $null }
-    Task = if ($SkipTask) { 'skipped' } else { $taskName }
+if ($Remote) {
+    [pscustomobject]@{
+        Server = $serverName
+        Mode = 'remote spoke'
+        HubUrl = $HubUrl
+        TokenEnvVar = $TokenEnvVar
+        BackupDirectory = if (Test-Path -LiteralPath $backupRoot) { $backupRoot } else { $null }
+        Task = 'skipped (a spoke never ingests)'
+    }
+} else {
+    [pscustomobject]@{
+        Server = $serverName
+        Mode = 'local hub'
+        Python = $pythonExe
+        ServerScript = $serverScript
+        BackupDirectory = if (Test-Path -LiteralPath $backupRoot) { $backupRoot } else { $null }
+        Task = if ($SkipTask) { 'skipped' } else { $taskName }
+    }
 }
